@@ -1,0 +1,1 @@
+spark-submit --master yarn --deploy-mode client --driver-class-path /opt/cloudera/parcels/CDH-5.2.0-1.cdh5.2.0.p0.36/jars/ --class "org.apache.spark.streaming.dmtc.SparkStream" --jars $(echo /home/dmm/lib/*.jar | tr ' ' ',') target/scala-2.10/realtime_recommned_2.10-1.0.jar
