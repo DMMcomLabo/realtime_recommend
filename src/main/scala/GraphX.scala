@@ -13,9 +13,9 @@ object GraphX {
     val conf = new SparkConf().setMaster("local[4]").setAppName("GraphX")
     val sc = new SparkContext(conf)
     
-    val initialMap:Map[Long, Double] = Map.empty
-    val initialMessage: (Map[Long, Double], Double) = (initialMap, 0.0)
-    val nodes: RDD[(VertexId, (String, String, Double, (Map[Long, Double], Double)))] =
+    val initialMap:Map[Long, (String, Double)] = Map.empty
+    val initialMessage: (Map[Long, (String, Double)], Double) = (initialMap, 0.0)
+    val nodes: RDD[(VertexId, (String, String, Double, (Map[Long, (String, Double)], Double)))] =
       sc.parallelize(Array(
           (10001L, ("word", "艦隊これくしょん", 0.8, initialMessage)),
           (10002L, ("word", "魔法少女まどか☆マギカ", 0.8, initialMessage)),
@@ -72,21 +72,38 @@ object GraphX {
 //        triplet.srcAttr._2 + " :- " + triplet.attr + " -> " + triplet.dstAttr._2)
 //        .collect.foreach(println(_))
     
-    def mergeMap(map1: Map[Long, Double], map2: Map[Long, Double]):Map[Long, Double] =  {
-      (map1.keySet ++ map2.keySet).map( i => (i, map1.getOrElse(i, 0.0) + map2.getOrElse(i, 0.0))).toMap
+    def mergeMap(map1: Map[Long, (String, Double)], map2: Map[Long, (String, Double)]):Map[Long, (String, Double)] =  {
+      (map1.keySet ++ map2.keySet).map( i => {
+          val map1value = map1.getOrElse(i, ("", 0.0))
+          val map2value = map2.getOrElse(i, ("", 0.0))
+          val name = if (map1value._1 != "") map1value._1 else map2value._1
+          val score = map1value._2 + map2value._2
+        (i, (name, score))
+      }).toMap
     }
     
     val newGraph = graph.pregel(initialMessage, 2)(
       (id, VD, message) => VD.copy(_4 = message),
       triplet => { 
         if (triplet.srcAttr._1 == "word" && triplet.dstAttr._1 == "product") {
-          Iterator((triplet.dstId, (Map(triplet.srcId -> triplet.attr), 0.0)))
+          Iterator({
+              val wordId = triplet.srcId
+              val wordName = triplet.srcAttr._2
+              val wordProductRelation = triplet.attr
+              (triplet.dstId, (Map(wordId -> (wordName, wordProductRelation)), 0.0))
+            })
         } else if (triplet.srcAttr._1 == "product" && triplet.dstAttr._1 == "genre") {
           Iterator({
-              val oldMap = triplet.srcAttr._4._1
-              val attr = triplet.attr
-              val newMap:Map[Long, Double] = oldMap.keySet.map( i => (i, oldMap.getOrElse(i, 0.0) * attr)).toMap
-            (triplet.dstId, (newMap, triplet.attr))
+              val receiveMsg = triplet.srcAttr._4._1
+              val productGenreRelation = triplet.attr
+              val sendMsg:Map[Long, (String, Double)] = receiveMsg.keySet.map( i => {
+                  val receiveValue = receiveMsg.getOrElse(i, ("", 0.0))
+                  val receiveScore = receiveValue._2
+                  val sendScore = receiveScore * productGenreRelation
+                  val sendValue = receiveValue.copy(_2 = sendScore)
+                  (i, sendValue)
+                }).toMap
+            (triplet.dstId, (sendMsg, productGenreRelation))
           })
         } else {
           Iterator.empty
@@ -97,12 +114,17 @@ object GraphX {
     // Show correlation
     newGraph.vertices.filter(v => v._2._1 == "genre")
     .map( v => {
-        val id = v._1
-        val name = v._2._2
-        val wordmap = v._2._4._1
-        val weight = v._2._4._2
-        val modwordmap = wordmap.keySet.map( i => (i, wordmap.getOrElse(i, 0.0) / weight))
-        (id, name, modwordmap)
+        val genreId = v._1
+        val genreName = v._2._2
+        val receiveMsg = v._2._4._1
+        val totalProductionGenreRelation = v._2._4._2
+        val wordRelations = receiveMsg.keySet.map( i => {
+            val wordValue = receiveMsg.getOrElse(i, ("", 0.0))
+            val wordName = wordValue._1
+            val normalizedWordScore = wordValue._2 / totalProductionGenreRelation
+            (i, (wordName, normalizedWordScore))
+          })
+        (genreId, genreName, wordRelations.filter(p => p._2._2 > 0.3))
       })
     .collect.foreach(println(_))
     
