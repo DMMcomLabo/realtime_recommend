@@ -6,7 +6,6 @@ import org.apache.spark.rdd.RDD
 import org.apache.log4j.Logger
 import org.apache.log4j.Level
 
-/** Computes an approximation to pi */
 object GraphX {
   val initialMap:Map[Long, (String, Double)] = Map.empty
   val initialMessage: (Map[Long, (String, Double)], Double) = (initialMap, 0.0)
@@ -20,9 +19,26 @@ object GraphX {
       (i, (name, score))
     }).toMap
   }
+  
+  def normalizeRelations(rawRelations: Map[Long, (String, Double)], normalizeBase: Double) = {
+    if (normalizeBase == 0.0) {
+      rawRelations
+    } else {
+      rawRelations.keySet.map( i => {
+              val rawValue = rawRelations.getOrElse(i, ("", 0.0))
+              val rawName = rawValue._1
+              val normalizedValue = rawValue._2 / normalizeBase
+              (i, (rawName, normalizedValue))
+            }).toMap
+    }
+  }
+  
   def calcGenreWordRelation(graph: Graph[(String, String, Double, (Map[Long, (String, Double)], Double)), Double]) = {
-    val newGraph = graph.pregel(initialMessage, 2)(
-      (id, VD, message) => VD.copy(_4 = message),
+    graph.pregel(initialMessage, 2)(
+      (id, VD, message) => {
+        val normalizedRelations = normalizeRelations(message._1, message._2)
+        VD.copy(_4 = (normalizedRelations, 0.0))
+      },
       triplet => { 
         if (triplet.srcAttr._1 == "word" && triplet.dstAttr._1 == "product") {
           Iterator({
@@ -35,6 +51,7 @@ object GraphX {
           Iterator({
               val receiveMsg = triplet.srcAttr._4._1
               val productGenreRelation = triplet.attr
+              // Map.mapValuesは使えない
               val sendMsg:Map[Long, (String, Double)] = receiveMsg.keySet.map( i => {
                   val receiveValue = receiveMsg.getOrElse(i, ("", 0.0))
                   val receiveScore = receiveValue._2
@@ -50,23 +67,8 @@ object GraphX {
       },
       (msg1, msg2) => (mergeMap(msg1._1, msg2._1), msg1._2 + msg2._2)
     )
-    // Show correlation
-    newGraph.vertices.filter(v => v._2._1 == "genre")
-    .map( v => {
-        val genreId = v._1
-        val genreName = v._2._2
-        val receiveMsg = v._2._4._1
-        val totalProductGenreRelation = v._2._4._2
-        val wordRelations = receiveMsg.keySet.map( i => {
-            val wordValue = receiveMsg.getOrElse(i, ("", 0.0))
-            val wordName = wordValue._1
-            val normalizedWordScore = wordValue._2 / totalProductGenreRelation
-            (i, (wordName, normalizedWordScore))
-          })
-        (genreId, genreName, wordRelations.filter(p => p._2._2 > 0.3))
-      })
-    .collect.foreach(println(_))
   }
+  
   def main(args: Array[String]) {
     Logger.getLogger("org").setLevel(Level.OFF)
     val conf = new SparkConf().setMaster("local[4]").setAppName("GraphX")
@@ -123,7 +125,15 @@ object GraphX {
         ))
     // Build the initial Graph
     val graph = Graph(nodes, edges)
-    calcGenreWordRelation(graph);
+    val newGraph = calcGenreWordRelation(graph);
+    newGraph.vertices.filter(v => v._2._1 == "genre")
+    .map( v => {
+        val genreId = v._1
+        val genreName = v._2._2
+        val wordRelations = v._2._4._1
+        (genreId, genreName, wordRelations.filter(p => p._2._2 > 0.3))
+      })
+    .collect.foreach(println(_))
     
     // Show triplets
 //    graph.triplets.map(triplet =>
