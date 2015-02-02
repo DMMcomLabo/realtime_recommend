@@ -5,6 +5,8 @@ import org.apache.spark.graphx._
 import org.apache.spark.rdd.RDD
 import org.apache.log4j.Logger
 import org.apache.log4j.Level
+import java.security.MessageDigest
+import scala.collection.mutable.HashMap
 
 object GraphX {
   val initialMap:Map[Long, (String, Double)] = Map.empty
@@ -74,55 +76,68 @@ object GraphX {
     val conf = new SparkConf().setMaster("local[4]").setAppName("GraphX")
     val sc = new SparkContext(conf)
 
+    var m_table = HashMap.empty[Long, (String, String)]
+    var edge = List.empty[(Long ,Long, Double)]
+    def generateHash(nodeType: String, name: String): Long = {
+      MessageDigest.getInstance("MD5")
+      .digest((nodeType + name).getBytes)
+      .slice(0, 8)
+      .zipWithIndex
+      .map({case (byte, index) => (byte & 0xffL) << (8 * index)})
+      .sum
+    }
+    def generateNode(nodeType: String, name: String) = {
+       generateHash(nodeType, name) -> (nodeType, name)
+    }
+    m_table += generateNode("word", "艦隊これくしょん")
+    m_table += generateNode("word", "魔法少女まどか☆マギカ")
+    m_table += generateNode("product", "艦隊これくしょん -艦これ- アンソロジーコミック 横須賀鎮守府編 （1）")
+    m_table += generateNode("product", "艦隊これくしょん‐艦これ‐コミックアラカルト 舞鶴鎮守府編 壱")
+    m_table += generateNode("product", "第1話 艦隊これくしょん-艦これ-")
+    m_table += generateNode("product", "艦隊これくしょん-艦これ- 第1巻 限定版 【DMMオリジナル特典付き】（ブルーレイディスク）")
+    m_table += generateNode("product", "劇場版 魔法少女まどか☆マギカ [前編] 始まりの物語")
+    m_table += generateNode("product", "劇場版 魔法少女まどか☆マギカ [後編] 永遠の物語")
+    m_table += generateNode("genre", "青年コミック")
+    m_table += generateNode("genre", "2015年冬アニメ")
+    m_table += generateNode("genre", "アクション")
+    m_table += generateNode("genre", "2010年代")
+    m_table += generateNode("genre", "テレビ")
+    m_table += generateNode("genre", "魔法少女")
+    m_table += generateNode("genre", "劇場版（アニメ映画）")
+    m_table += generateNode("genre", "SF/ファンタジー")
+    edge = (generateHash("word", "艦隊これくしょん"), generateHash("product", "艦隊これくしょん -艦これ- アンソロジーコミック 横須賀鎮守府編 （1）"), 0.8) :: edge
+    edge = (generateHash("word", "艦隊これくしょん"), generateHash("product", "艦隊これくしょん‐艦これ‐コミックアラカルト 舞鶴鎮守府編 壱"), 0.7) :: edge
+    edge = (generateHash("word", "艦隊これくしょん"), generateHash("product", "第1話 艦隊これくしょん-艦これ-"), 0.6) :: edge
+    edge = (generateHash("word", "艦隊これくしょん"), generateHash("product", "艦隊これくしょん-艦これ- 第1巻 限定版 【DMMオリジナル特典付き】（ブルーレイディスク）"), 0.5) :: edge
+    edge = (generateHash("word", "魔法少女まどか☆マギカ"), generateHash("product", "劇場版 魔法少女まどか☆マギカ [前編] 始まりの物語"), 0.8) :: edge
+    edge = (generateHash("word", "魔法少女まどか☆マギカ"), generateHash("product", "劇場版 魔法少女まどか☆マギカ [後編] 永遠の物語"), 0.7) :: edge
+    edge = (generateHash("product", "艦隊これくしょん -艦これ- アンソロジーコミック 横須賀鎮守府編 （1）"), generateHash("genre", "青年コミック"), 0.7) :: edge
+    edge = (generateHash("product", "艦隊これくしょん‐艦これ‐コミックアラカルト 舞鶴鎮守府編 壱"), generateHash("genre", "青年コミック"), 0.7) :: edge
+    edge = (generateHash("product", "第1話 艦隊これくしょん-艦これ-"), generateHash("genre", "2015年冬アニメ"), 0.7) :: edge
+    edge = (generateHash("product", "艦隊これくしょん-艦これ- 第1巻 限定版 【DMMオリジナル特典付き】（ブルーレイディスク）"), generateHash("genre", "2015年冬アニメ"), 0.7) :: edge
+    edge = (generateHash("product", "第1話 艦隊これくしょん-艦これ-"), generateHash("genre", "アクション"), 0.7) :: edge
+    edge = (generateHash("product", "艦隊これくしょん-艦これ- 第1巻 限定版 【DMMオリジナル特典付き】（ブルーレイディスク）"), generateHash("genre", "アクション"), 0.7) :: edge
+    edge = (generateHash("product", "劇場版 魔法少女まどか☆マギカ [前編] 始まりの物語"), generateHash("genre", "アクション"), 0.7) :: edge
+    edge = (generateHash("product", "劇場版 魔法少女まどか☆マギカ [後編] 永遠の物語"), generateHash("genre", "アクション"), 0.7) :: edge
+    edge = (generateHash("product", "第1話 艦隊これくしょん-艦これ-"), generateHash("genre", "2010年代"), 0.7) :: edge
+    edge = (generateHash("product", "艦隊これくしょん-艦これ- 第1巻 限定版 【DMMオリジナル特典付き】（ブルーレイディスク）"), generateHash("genre", "2010年代"), 0.7) :: edge
+    edge = (generateHash("product", "劇場版 魔法少女まどか☆マギカ [前編] 始まりの物語"), generateHash("genre", "2010年代"), 0.7) :: edge
+    edge = (generateHash("product", "劇場版 魔法少女まどか☆マギカ [後編] 永遠の物語"), generateHash("genre", "2010年代"), 0.7) :: edge
+    edge = (generateHash("product", "第1話 艦隊これくしょん-艦これ-"), generateHash("genre", "テレビ"), 0.7) :: edge
+    edge = (generateHash("product", "艦隊これくしょん-艦これ- 第1巻 限定版 【DMMオリジナル特典付き】（ブルーレイディスク）"), generateHash("genre", "テレビ"), 0.7) :: edge
+    edge = (generateHash("product", "劇場版 魔法少女まどか☆マギカ [前編] 始まりの物語"), generateHash("genre", "魔法少女"), 0.7) :: edge
+    edge = (generateHash("product", "劇場版 魔法少女まどか☆マギカ [後編] 永遠の物語"), generateHash("genre", "魔法少女"), 0.7) :: edge
+    edge = (generateHash("product", "劇場版 魔法少女まどか☆マギカ [前編] 始まりの物語"), generateHash("genre", "劇場版（アニメ映画）"), 0.7) :: edge
+    edge = (generateHash("product", "劇場版 魔法少女まどか☆マギカ [後編] 永遠の物語"), generateHash("genre", "劇場版（アニメ映画）"), 0.7) :: edge
+    edge = (generateHash("product", "艦隊これくしょん-艦これ- 第1巻 限定版 【DMMオリジナル特典付き】（ブルーレイディスク）"), generateHash("genre", "SF/ファンタジー"), 0.7) :: edge
+    edge = (generateHash("product", "劇場版 魔法少女まどか☆マギカ [前編] 始まりの物語"), generateHash("genre", "SF/ファンタジー"), 0.7) :: edge
+    edge = (generateHash("product", "劇場版 魔法少女まどか☆マギカ [後編] 永遠の物語"), generateHash("genre", "SF/ファンタジー"), 0.7) :: edge
+    
     val nodes: RDD[(VertexId, (String, String, Double, (Map[Long, (String, Double)], Double)))] =
-      sc.parallelize(Array(
-          (10001L, ("word", "艦隊これくしょん", 0.8, initialMessage)),
-          (10002L, ("word", "魔法少女まどか☆マギカ", 0.8, initialMessage)),
-          (20001L, ("product", "艦隊これくしょん -艦これ- アンソロジーコミック 横須賀鎮守府編 （1）", 1.0, initialMessage)),
-          (20002L, ("product", "艦隊これくしょん‐艦これ‐コミックアラカルト 舞鶴鎮守府編 壱", 1.0, initialMessage)),
-          (20003L, ("product", "第1話 艦隊これくしょん-艦これ-", 1.0, initialMessage)),
-          (20004L, ("product", "艦隊これくしょん-艦これ- 第1巻 限定版 【DMMオリジナル特典付き】（ブルーレイディスク）", 1.0, initialMessage)),
-          (20005L, ("product", "劇場版 魔法少女まどか☆マギカ [前編] 始まりの物語", 1.0, initialMessage)),
-          (20006L, ("product", "劇場版 魔法少女まどか☆マギカ [後編] 永遠の物語", 1.0, initialMessage)),
-          (30001L, ("genre", "青年コミック", 1.0, initialMessage)),
-          (30002L, ("genre", "2015年冬アニメ", 1.0, initialMessage)),
-          (30003L, ("genre", "アクション", 1.0, initialMessage)),
-          (30004L, ("genre", "2010年代", 1.0, initialMessage)),
-          (30005L, ("genre", "テレビ", 1.0, initialMessage)),
-          (30006L, ("genre", "魔法少女", 1.0, initialMessage)),
-          (30007L, ("genre", "劇場版（アニメ映画）", 1.0, initialMessage)),
-          (30008L, ("genre", "SF/ファンタジー", 1.0, initialMessage))
-        ))
+      sc.parallelize(m_table.toArray.map({ case (id, (nodeType, name)) => (id, (nodeType, name, 1.0, initialMessage)) }))
     val edges: RDD[Edge[Double]] =
-      sc.parallelize(Array(
-          (Edge(10001L, 20001L, 0.8)),
-          (Edge(10001L, 20002L, 0.7)),
-          (Edge(10001L, 20003L, 0.6)),
-          (Edge(10001L, 20004L, 0.5)),
-          (Edge(10002L, 20005L, 0.8)),
-          (Edge(10002L, 20006L, 0.7)),
-          (Edge(20001L, 30001L, 0.7)),
-          (Edge(20002L, 30001L, 0.7)),
-          (Edge(20003L, 30002L, 0.7)),
-          (Edge(20004L, 30002L, 0.7)),
-          (Edge(20003L, 30003L, 0.7)),
-          (Edge(20004L, 30003L, 0.7)),
-          (Edge(20005L, 30003L, 0.7)),
-          (Edge(20006L, 30003L, 0.7)),
-          (Edge(20003L, 30004L, 0.7)),
-          (Edge(20004L, 30004L, 0.7)),
-          (Edge(20005L, 30004L, 0.7)),
-          (Edge(20006L, 30004L, 0.7)),
-          (Edge(20003L, 30005L, 0.7)),
-          (Edge(20004L, 30005L, 0.7)),
-          (Edge(20005L, 30006L, 0.7)),
-          (Edge(20006L, 30006L, 0.7)),
-          (Edge(20005L, 30007L, 0.7)),
-          (Edge(20006L, 30007L, 0.7)),
-          (Edge(20004L, 30008L, 0.7)),
-          (Edge(20005L, 30008L, 0.7)),
-          (Edge(20006L, 30008L, 0.7))
-        ))
+      sc.parallelize(edge.toArray.map({ case(fromId, toId, value) => Edge(fromId, toId, value)}))
+    
     // Build the initial Graph
     val graph = Graph(nodes, edges)
     val newGraph = calcGenreWordRelation(graph);
