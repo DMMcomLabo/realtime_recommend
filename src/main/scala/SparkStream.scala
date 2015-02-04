@@ -61,8 +61,10 @@ val http = new Http()
     val ssc = new StreamingContext(conf, Seconds(5))
     val sc = ssc.sparkContext
     val filter = new FilterQuery
-    val locations = Array(Array( 122.87d,24.84d ),Array(153.01d,46.80d))
-    filter.locations(locations)
+//    val locations = Array(Array( 122.87d,24.84d ),Array(153.01d,46.80d))
+//    filter.locations(locations)
+    val track = Array("#kurobas","#dp_anime","#暗殺教室","#jojo_anime","#konodan","#drrr_anime","#夜ヤッター","#falgaku","#みりたり","#rollinggirls","#milkyholmes","#aldnoahzero","#shohari","#fafner","#mikagesha","#ISUCA","#fafnir_a","#koufukug","#tkg_anime","#艦これ","#yamato2199","#ぱんきす","#boueibu","#shinmaimaou","#maria_anime","#ワルブレ_A","#yurikuma","#dogdays","#saekano","#garupan","#abso_duo","#anisama","#imas_cg","#1kari","#monogatari","#cfvanguard","#実在性ミリオンアーサー","#teamdayan","#anime_dayan", "#dayan","#nekonodayan","#morikawa3","#donten","#kiseiju_anime","#loghorizon","#pp_anime")
+    filter.track(track)
     
     val tweets = TwitterDmmUtils.createStream(ssc, None,filter)
     /**
@@ -133,13 +135,13 @@ val http = new Http()
       edgeRDD = rdd.flatMap(x => x)
       val graph = Graph.fromEdges(edgeRDD, GraphX.initialMessage)
       val newGraph = GraphX.calcGenreWordRelation(graph);
-      newGraph.triplets.filter(t => t.attr._1 == "attr")
-      .map( t => {
-          val genreId = t.dstId
-          val wordRelations = t.dstAttr._1
-          (genreId, wordRelations.filter(p => p._2._3 > 10))
+      newGraph.vertices.filter(v => v._2._2 == "genre")
+      .map( v => {
+          val genreId = v._1
+          val wordRelations = v._2._1
+          wordRelations.filter({ case (id, (word, genre, score)) => genre != "" && score > 0.5}).values
         })
-      .filter( t => t._2.nonEmpty)
+      .filter( t => t.nonEmpty)
       .collect.foreach(println(_))
       println("----------------------------")
     })

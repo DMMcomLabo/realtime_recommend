@@ -10,7 +10,7 @@ import scala.collection.mutable.HashMap
 
 object GraphX {
   val initialMap:Map[Long, (String, String, Double)] = Map.empty
-  val initialMessage: (Map[Long, (String, String, Double)], Double) = (initialMap, 0.0)
+  val initialMessage: (Map[Long, (String, String, Double)], String, Double) = (initialMap, "", 0.0)
   
   def mergeMap(map1: Map[Long, (String, String, Double)], map2: Map[Long, (String, String, Double)]):Map[Long, (String, String, Double)] =  {
     (map1.keySet ++ map2.keySet).map( i => {
@@ -35,11 +35,12 @@ object GraphX {
     }
   }
   
-  def calcGenreWordRelation(graph: Graph[(Map[Long, (String, String, Double)], Double), (String, String, Double)]) = {
+  def calcGenreWordRelation(graph: Graph[(Map[Long, (String, String, Double)], String, Double), (String, String, Double)]) = {
     graph.pregel(initialMessage, 2)(
       (id, VD, message) => {
-        val normalizedRelations = normalizeRelations(message._1, message._2)
-        (normalizedRelations, 0.0)
+        val (rawRelations, nodeType, normalizeBase) = message
+        val normalizedRelations = normalizeRelations(rawRelations, normalizeBase)
+        (normalizedRelations, nodeType, 0.0)
       },
       triplet => { 
         val (edgeType, edgeLabel, edgeWeight) = triplet.attr
@@ -48,7 +49,7 @@ object GraphX {
               val wordId = triplet.srcId
               val wordName = edgeLabel
               val wordProductRelation = edgeWeight
-              (triplet.dstId, (Map(wordId -> (wordName, "", wordProductRelation)), 0.0))
+              (triplet.dstId, (Map(wordId -> (wordName, "", wordProductRelation)), "product", 0.0))
             })
         } else if (edgeType == "attr") {
           Iterator({
@@ -61,13 +62,13 @@ object GraphX {
                   val sendScore = receiveScore * productGenreRelation
                   (i, (wordName, genreName, sendScore))
                 }).toMap
-            (triplet.dstId, (sendMsg, productGenreRelation))
+            (triplet.dstId, (sendMsg, "genre", productGenreRelation))
           })
         } else {
           Iterator.empty
         }
       },
-      (msg1, msg2) => (mergeMap(msg1._1, msg2._1), msg1._2 + msg2._2)
+      (msg1, msg2) => (mergeMap(msg1._1, msg2._1), msg1._2, msg1._3 + msg2._3)
     )
   }
   def generateHash(nodeType: String, name: String): Long = {
@@ -141,11 +142,11 @@ object GraphX {
     // Build the initial Graph
     val graph = createGraph(sc, edge)
     val newGraph = calcGenreWordRelation(graph)
-    newGraph.triplets.filter(t => t.attr._1 == "attr")
-    .map( t => {
-        val genreId = t.dstId
-        val wordRelations = t.dstAttr._1
-        (genreId, wordRelations.filter(p => p._2._3 > 0.3))
+    newGraph.vertices.filter(v => v._2._2 == "genre")
+    .map( v => {
+        val genreId = v._1
+        val wordRelations = v._2._1
+        wordRelations.filter(p => p._2._3 > 0.3)
       })
     .collect.foreach(println(_))
     
