@@ -18,6 +18,11 @@ import org.apache.spark.SparkContext._
 import org.apache.spark.mllib.classification.SVMWithSGD
 import org.apache.spark.mllib.regression.LabeledPoint
 
+
+import math._
+
+
+
 import scala.collection.JavaConverters._
 import org.apache.spark._
 //import org.apache.spark.streaming.twitter._
@@ -40,11 +45,10 @@ import org.atilika.kuromoji.Token
 
 import java.util.regex._
 import java.net.{URI,URLDecoder,URLEncoder}
-import java.security.MessageDigest
 
 import com.typesafe.config.ConfigFactory
 
-object SparkStream {
+object SparkCreateTrainingData {
 
 val http = new Http()
 
@@ -64,64 +68,35 @@ val http = new Http()
     val tweets = TwitterDmmUtils.createStream(ssc, None,filter)
     /**
       * 5秒分のtweet
-      * <word>,(Array[(word,title,ganre,score)],1)
+      * <word>,(<userId>,1)
       */
     val statuses = tweets.flatMap(status =>{
 	    val kuromojiList = kuromojiParser(status.getText,status.getId)
+	    //@todo search 
 	 (kuromojiList)
-	}).map{row =>{
-		val list = wordSearch(row).split("\n")
-		val a = list.drop(1).map( t =>{
-			val cols = t.split(",")
-			(row,cols(0),cols(1),cols(2))
-		})
-	
-		(row,(a,1))
-	}}
-//    statuses.print()
+	})
+    .map( row =>{
+                val list = wordSearch(row).split("\n")
+		list.drop(1).length match{
+			case 0 =>
+			case x =>{
+				list(ceil(x/2).toInt)
+			}
+		}
+	//(row,list.drop(1).mkString("::"))
+	(row,list(0))
+	})
+    statuses.print()
     /**
      * 1時間分のtweetの集計countの降順
-     * <1時間分のcount> ,(Array[(word,title,ganre,score)],<ワード>)
+     * <1時間分のcount> ,(<userID[:UserID]> ,<ワード>)
      */
-    //val perOneHours = statuses.reduceByKeyAndWindow((a:(String,Int),b:(String,Int)) =>{(a._1+":"+b._1,a._2+b._2)},Minutes(60)).map{
-    //		 case(a,b) => (b._2,(b._1,a))
-    val perOneHours = statuses.reduceByKeyAndWindow( (a:(Array[Tuple4[String,String,String,String]],Int),b:(Array[Tuple4[String,String,String,String]],Int)) =>{
-		val c = a._1
-		(c,a._2+b._2)
-	},Minutes(60)).map{
-		 case(a,b) => (b._2,(b._1,a))
-	}.transform(_.sortByKey(false))
+//    val perOneHours = statuses.reduceByKeyAndWindow((a:(String,Int),b:(String,Int)) =>{(a._1+":"+b._1,a._2+b._2)},Minutes(60)).map{
+//		 case(a,b) => (b._2,(b._1,a))
+//	}.transform(_.sortByKey(false))
 //    perOneHours.print()
-     /**
-      * 1時間分のvertexとedgeを返す
-      * Array[count,((uniqueID,Type,Name),(From,To,Score)]
-      */
-    var m_table = scala.collection.mutable.HashMap.empty[String,(String,String)]
-    var edge = List.empty[(String,String,Any)]
-    var graphBaseData = perOneHours.map( row =>{
-        val (count,(list,word)) = row
-
-        val word_digest = MessageDigest.getInstance("MD5").digest(word.getBytes).map("%02x".format(_)).mkString
-	if(!m_table.contains(word_digest)){
-		m_table += word_digest -> ("word",word)
-	}
-	list.map( products =>{
-		val (word,title,ganre,score) = products
-		val product_digest = MessageDigest.getInstance("MD5").digest(title.getBytes).map("%02x".format(_)).mkString
-		if(!m_table.contains(product_digest)){
-			m_table += word_digest -> ("product",title)
-		}
-		val ganre_digest = MessageDigest.getInstance("MD5").digest(ganre.getBytes).map("%02x".format(_)).mkString
-		if(!m_table.contains(product_digest)){
-			m_table += word_digest -> ("ganre",ganre)
-		}
-		edge = edge ::: List((word_digest,product_digest,score))
-		edge = edge ::: List((product_digest,ganre_digest,score))
-	})
-	(count)
-    }).print()
     
-
+     
     
 //    val graph = statuses.map(fields => (findShipName(account_map_list, fields._1, fields._2), textConverter(keywords, shipNames, fields._2)))
 //            .flatMap(fields => fields._2.map(fields._1 + "dmtc_separator" + _))
@@ -213,7 +188,7 @@ val http = new Http()
    */
   def wordSearch(text:String): String = {
     val encodeText = URLEncoder.encode(text,"UTF-8")
-    val request = url("http://vmsvr004:8888/solr/dmm/select?start=0&rows=30&defType=edismax&fl=title,genre,score&fq=-service:mono&qf=title_ja%5E30.0%20title_cjk%5E12.0%20subtitle_ja%5E20.0%20subtitle_cjk%5E8.0%20comment_ja%5E0.1%20comment_cjk%5E0.1&q=" + encodeText + "&wt=csv")
+    val request = url("http://vmsvr004:8888/solr/dmm/select?start=0&rows=30&defType=edismax&fl=score&fq=-service:mono&qf=title_ja%5E30.0%20title_cjk%5E12.0%20subtitle_ja%5E20.0%20subtitle_cjk%5E8.0%20comment_ja%5E0.1%20comment_cjk%5E0.1&q=" + encodeText + "&wt=csv")
     val response = http(request OK as.String)
     response.onComplete {
       case Success(msg) => msg
@@ -233,17 +208,14 @@ val http = new Http()
       .filter { t =>
         val token = t.asInstanceOf[Token]
 
-        token.getPartOfSpeech.indexOf("名詞") > -1 && token.getPartOfSpeech.indexOf("一般") > -1 
+        token.getPartOfSpeech.indexOf("名詞") > -1 && token.getPartOfSpeech.indexOf("一般") > -1  && token.getSurfaceForm.length > 1 && !(token.getSurfaceForm matches "^[a-zA-Z]+$|^[0-9]+$")
 //        token.getPartOfSpeech.indexOf("名詞") > -1 
       }
       .map(t => t.asInstanceOf[Token].getSurfaceForm)
-      .filter{ v =>
-	v.length > 1 && !(v matches "^[a-zA-Z]+$|^[0-9]+$")
-      }
-      .toList
+
     result.length match {
       case 0 => List.empty[String]
-      case _ => List( result.last)
+      case _ => List(result.mkString(","))
     }
   }
 }
