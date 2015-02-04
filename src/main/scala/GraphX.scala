@@ -1,4 +1,4 @@
-package org.apache.spark.examples
+package org.apache.spark.streaming.dmtc
 
 import org.apache.spark._
 import org.apache.spark.graphx._
@@ -9,57 +9,57 @@ import java.security.MessageDigest
 import scala.collection.mutable.HashMap
 
 object GraphX {
-  val initialMap:Map[Long, (String, Double)] = Map.empty
-  val initialMessage: (Map[Long, (String, Double)], Double) = (initialMap, 0.0)
+  val initialMap:Map[Long, (String, String, Double)] = Map.empty
+  val initialMessage: (Map[Long, (String, String, Double)], Double) = (initialMap, 0.0)
   
-  def mergeMap(map1: Map[Long, (String, Double)], map2: Map[Long, (String, Double)]):Map[Long, (String, Double)] =  {
+  def mergeMap(map1: Map[Long, (String, String, Double)], map2: Map[Long, (String, String, Double)]):Map[Long, (String, String, Double)] =  {
     (map1.keySet ++ map2.keySet).map( i => {
-        val map1value = map1.getOrElse(i, ("", 0.0))
-        val map2value = map2.getOrElse(i, ("", 0.0))
-        val name = if (map1value._1 != "") map1value._1 else map2value._1
-        val score = map1value._2 + map2value._2
-      (i, (name, score))
+        val map1value = map1.getOrElse(i, ("", "", 0.0))
+        val map2value = map2.getOrElse(i, ("", "", 0.0))
+        val wordName = if (map1value._1 != "") map1value._1 else map2value._1
+        val genreName = if (map1value._2 != "") map1value._2 else map2value._2
+        val score = map1value._3 + map2value._3
+      (i, (wordName, genreName, score))
     }).toMap
   }
   
-  def normalizeRelations(rawRelations: Map[Long, (String, Double)], normalizeBase: Double) = {
+  def normalizeRelations(rawRelations: Map[Long, (String, String, Double)], normalizeBase: Double) = {
     if (normalizeBase == 0.0) {
       rawRelations
     } else {
       rawRelations.keySet.map( i => {
-              val rawValue = rawRelations.getOrElse(i, ("", 0.0))
-              val rawName = rawValue._1
-              val normalizedValue = rawValue._2 / normalizeBase
-              (i, (rawName, normalizedValue))
+              val (wordName, genreName, rawValue) = rawRelations.getOrElse(i, ("", "", 0.0))
+              val normalizedValue = rawValue / normalizeBase
+              (i, (wordName, genreName, normalizedValue))
             }).toMap
     }
   }
   
-  def calcGenreWordRelation(graph: Graph[(String, String, Double, (Map[Long, (String, Double)], Double)), Double]) = {
+  def calcGenreWordRelation(graph: Graph[(Map[Long, (String, String, Double)], Double), (String, String, Double)]) = {
     graph.pregel(initialMessage, 2)(
       (id, VD, message) => {
         val normalizedRelations = normalizeRelations(message._1, message._2)
-        VD.copy(_4 = (normalizedRelations, 0.0))
+        (normalizedRelations, 0.0)
       },
       triplet => { 
-        if (triplet.srcAttr._1 == "word" && triplet.dstAttr._1 == "product") {
+        val (edgeType, edgeLabel, edgeWeight) = triplet.attr
+        if (edgeType == "search") {
           Iterator({
               val wordId = triplet.srcId
-              val wordName = triplet.srcAttr._2
-              val wordProductRelation = triplet.attr
-              (triplet.dstId, (Map(wordId -> (wordName, wordProductRelation)), 0.0))
+              val wordName = edgeLabel
+              val wordProductRelation = edgeWeight
+              (triplet.dstId, (Map(wordId -> (wordName, "", wordProductRelation)), 0.0))
             })
-        } else if (triplet.srcAttr._1 == "product" && triplet.dstAttr._1 == "genre") {
+        } else if (edgeType == "attr") {
           Iterator({
-              val receiveMsg = triplet.srcAttr._4._1
-              val productGenreRelation = triplet.attr
+              val receiveMsg = triplet.srcAttr._1
+              val productGenreRelation = edgeWeight
               // Map.mapValuesは使えない
-              val sendMsg:Map[Long, (String, Double)] = receiveMsg.keySet.map( i => {
-                  val receiveValue = receiveMsg.getOrElse(i, ("", 0.0))
-                  val receiveScore = receiveValue._2
+              val sendMsg:Map[Long, (String, String, Double)] = receiveMsg.keySet.map( i => {
+                  val (wordName, _, receiveScore) = receiveMsg.getOrElse(i, ("", "", 0.0))
+                  val genreName = edgeLabel
                   val sendScore = receiveScore * productGenreRelation
-                  val sendValue = receiveValue.copy(_2 = sendScore)
-                  (i, sendValue)
+                  (i, (wordName, genreName, sendScore))
                 }).toMap
             (triplet.dstId, (sendMsg, productGenreRelation))
           })
@@ -70,6 +70,22 @@ object GraphX {
       (msg1, msg2) => (mergeMap(msg1._1, msg2._1), msg1._2 + msg2._2)
     )
   }
+  def generateHash(nodeType: String, name: String): Long = {
+    MessageDigest.getInstance("MD5")
+    .digest((nodeType + name).getBytes)
+    .slice(0, 8)
+    .zipWithIndex
+    .map({case (byte, index) => (byte & 0xffL) << (8 * index)})
+    .sum
+  }
+  def generateNode(nodeType: String, name: String) = {
+     generateHash(nodeType, name) -> (nodeType, name)
+  }
+  def createGraph(sc: SparkContext, edge: List[(Long ,Long, (String, String, Double))]) = {
+    val edges: RDD[Edge[(String, String, Double)]] =
+      sc.parallelize(edge.toArray.map({ case(fromId, toId, (edgeType, label, value)) => Edge(fromId, toId, (edgeType, label, value))}))
+    Graph.fromEdges(edges, initialMessage)
+  }
   
   def main(args: Array[String]) {
     Logger.getLogger("org").setLevel(Level.OFF)
@@ -77,18 +93,7 @@ object GraphX {
     val sc = new SparkContext(conf)
 
     var m_table = HashMap.empty[Long, (String, String)]
-    var edge = List.empty[(Long ,Long, Double)]
-    def generateHash(nodeType: String, name: String): Long = {
-      MessageDigest.getInstance("MD5")
-      .digest((nodeType + name).getBytes)
-      .slice(0, 8)
-      .zipWithIndex
-      .map({case (byte, index) => (byte & 0xffL) << (8 * index)})
-      .sum
-    }
-    def generateNode(nodeType: String, name: String) = {
-       generateHash(nodeType, name) -> (nodeType, name)
-    }
+    var edge = List.empty[(Long ,Long, (String, String, Double))]
     m_table += generateNode("word", "艦隊これくしょん")
     m_table += generateNode("word", "魔法少女まどか☆マギカ")
     m_table += generateNode("product", "艦隊これくしょん -艦これ- アンソロジーコミック 横須賀鎮守府編 （1）")
@@ -105,48 +110,42 @@ object GraphX {
     m_table += generateNode("genre", "魔法少女")
     m_table += generateNode("genre", "劇場版（アニメ映画）")
     m_table += generateNode("genre", "SF/ファンタジー")
-    edge = (generateHash("word", "艦隊これくしょん"), generateHash("product", "艦隊これくしょん -艦これ- アンソロジーコミック 横須賀鎮守府編 （1）"), 0.8) :: edge
-    edge = (generateHash("word", "艦隊これくしょん"), generateHash("product", "艦隊これくしょん‐艦これ‐コミックアラカルト 舞鶴鎮守府編 壱"), 0.7) :: edge
-    edge = (generateHash("word", "艦隊これくしょん"), generateHash("product", "第1話 艦隊これくしょん-艦これ-"), 0.6) :: edge
-    edge = (generateHash("word", "艦隊これくしょん"), generateHash("product", "艦隊これくしょん-艦これ- 第1巻 限定版 【DMMオリジナル特典付き】（ブルーレイディスク）"), 0.5) :: edge
-    edge = (generateHash("word", "魔法少女まどか☆マギカ"), generateHash("product", "劇場版 魔法少女まどか☆マギカ [前編] 始まりの物語"), 0.8) :: edge
-    edge = (generateHash("word", "魔法少女まどか☆マギカ"), generateHash("product", "劇場版 魔法少女まどか☆マギカ [後編] 永遠の物語"), 0.7) :: edge
-    edge = (generateHash("product", "艦隊これくしょん -艦これ- アンソロジーコミック 横須賀鎮守府編 （1）"), generateHash("genre", "青年コミック"), 0.7) :: edge
-    edge = (generateHash("product", "艦隊これくしょん‐艦これ‐コミックアラカルト 舞鶴鎮守府編 壱"), generateHash("genre", "青年コミック"), 0.7) :: edge
-    edge = (generateHash("product", "第1話 艦隊これくしょん-艦これ-"), generateHash("genre", "2015年冬アニメ"), 0.7) :: edge
-    edge = (generateHash("product", "艦隊これくしょん-艦これ- 第1巻 限定版 【DMMオリジナル特典付き】（ブルーレイディスク）"), generateHash("genre", "2015年冬アニメ"), 0.7) :: edge
-    edge = (generateHash("product", "第1話 艦隊これくしょん-艦これ-"), generateHash("genre", "アクション"), 0.7) :: edge
-    edge = (generateHash("product", "艦隊これくしょん-艦これ- 第1巻 限定版 【DMMオリジナル特典付き】（ブルーレイディスク）"), generateHash("genre", "アクション"), 0.7) :: edge
-    edge = (generateHash("product", "劇場版 魔法少女まどか☆マギカ [前編] 始まりの物語"), generateHash("genre", "アクション"), 0.7) :: edge
-    edge = (generateHash("product", "劇場版 魔法少女まどか☆マギカ [後編] 永遠の物語"), generateHash("genre", "アクション"), 0.7) :: edge
-    edge = (generateHash("product", "第1話 艦隊これくしょん-艦これ-"), generateHash("genre", "2010年代"), 0.7) :: edge
-    edge = (generateHash("product", "艦隊これくしょん-艦これ- 第1巻 限定版 【DMMオリジナル特典付き】（ブルーレイディスク）"), generateHash("genre", "2010年代"), 0.7) :: edge
-    edge = (generateHash("product", "劇場版 魔法少女まどか☆マギカ [前編] 始まりの物語"), generateHash("genre", "2010年代"), 0.7) :: edge
-    edge = (generateHash("product", "劇場版 魔法少女まどか☆マギカ [後編] 永遠の物語"), generateHash("genre", "2010年代"), 0.7) :: edge
-    edge = (generateHash("product", "第1話 艦隊これくしょん-艦これ-"), generateHash("genre", "テレビ"), 0.7) :: edge
-    edge = (generateHash("product", "艦隊これくしょん-艦これ- 第1巻 限定版 【DMMオリジナル特典付き】（ブルーレイディスク）"), generateHash("genre", "テレビ"), 0.7) :: edge
-    edge = (generateHash("product", "劇場版 魔法少女まどか☆マギカ [前編] 始まりの物語"), generateHash("genre", "魔法少女"), 0.7) :: edge
-    edge = (generateHash("product", "劇場版 魔法少女まどか☆マギカ [後編] 永遠の物語"), generateHash("genre", "魔法少女"), 0.7) :: edge
-    edge = (generateHash("product", "劇場版 魔法少女まどか☆マギカ [前編] 始まりの物語"), generateHash("genre", "劇場版（アニメ映画）"), 0.7) :: edge
-    edge = (generateHash("product", "劇場版 魔法少女まどか☆マギカ [後編] 永遠の物語"), generateHash("genre", "劇場版（アニメ映画）"), 0.7) :: edge
-    edge = (generateHash("product", "艦隊これくしょん-艦これ- 第1巻 限定版 【DMMオリジナル特典付き】（ブルーレイディスク）"), generateHash("genre", "SF/ファンタジー"), 0.7) :: edge
-    edge = (generateHash("product", "劇場版 魔法少女まどか☆マギカ [前編] 始まりの物語"), generateHash("genre", "SF/ファンタジー"), 0.7) :: edge
-    edge = (generateHash("product", "劇場版 魔法少女まどか☆マギカ [後編] 永遠の物語"), generateHash("genre", "SF/ファンタジー"), 0.7) :: edge
-    
-    val nodes: RDD[(VertexId, (String, String, Double, (Map[Long, (String, Double)], Double)))] =
-      sc.parallelize(m_table.toArray.map({ case (id, (nodeType, name)) => (id, (nodeType, name, 1.0, initialMessage)) }))
-    val edges: RDD[Edge[Double]] =
-      sc.parallelize(edge.toArray.map({ case(fromId, toId, value) => Edge(fromId, toId, value)}))
+    edge = (generateHash("word", "艦隊これくしょん"), generateHash("product", "艦隊これくしょん -艦これ- アンソロジーコミック 横須賀鎮守府編 （1）"), ("search", "艦隊これくしょん", 0.8)) :: edge
+    edge = (generateHash("word", "艦隊これくしょん"), generateHash("product", "艦隊これくしょん‐艦これ‐コミックアラカルト 舞鶴鎮守府編 壱"), ("search", "艦隊これくしょん", 0.7)) :: edge
+    edge = (generateHash("word", "艦隊これくしょん"), generateHash("product", "第1話 艦隊これくしょん-艦これ-"), ("search", "艦隊これくしょん", 0.6)) :: edge
+    edge = (generateHash("word", "艦隊これくしょん"), generateHash("product", "艦隊これくしょん-艦これ- 第1巻 限定版 【DMMオリジナル特典付き】（ブルーレイディスク）"), ("search", "艦隊これくしょん", 0.5)) :: edge
+    edge = (generateHash("word", "魔法少女まどか☆マギカ"), generateHash("product", "劇場版 魔法少女まどか☆マギカ [前編] 始まりの物語"), ("search", "魔法少女まどか☆マギカ", 0.8)) :: edge
+    edge = (generateHash("word", "魔法少女まどか☆マギカ"), generateHash("product", "劇場版 魔法少女まどか☆マギカ [後編] 永遠の物語"), ("search", "魔法少女まどか☆マギカ", 0.7)) :: edge
+    edge = (generateHash("product", "艦隊これくしょん -艦これ- アンソロジーコミック 横須賀鎮守府編 （1）"), generateHash("genre", "青年コミック"), ("attr", "青年コミック", 0.7)) :: edge
+    edge = (generateHash("product", "艦隊これくしょん‐艦これ‐コミックアラカルト 舞鶴鎮守府編 壱"), generateHash("genre", "青年コミック"), ("attr", "青年コミック", 0.7)) :: edge
+    edge = (generateHash("product", "第1話 艦隊これくしょん-艦これ-"), generateHash("genre", "2015年冬アニメ"), ("attr", "2015年冬アニメ", 0.7)) :: edge
+    edge = (generateHash("product", "艦隊これくしょん-艦これ- 第1巻 限定版 【DMMオリジナル特典付き】（ブルーレイディスク）"), generateHash("genre", "2015年冬アニメ"), ("attr", "2015年冬アニメ", 0.7)) :: edge
+    edge = (generateHash("product", "第1話 艦隊これくしょん-艦これ-"), generateHash("genre", "アクション"), ("attr", "アクション", 0.7)) :: edge
+    edge = (generateHash("product", "艦隊これくしょん-艦これ- 第1巻 限定版 【DMMオリジナル特典付き】（ブルーレイディスク）"), generateHash("genre", "アクション"), ("attr", "アクション", 0.7)) :: edge
+    edge = (generateHash("product", "劇場版 魔法少女まどか☆マギカ [前編] 始まりの物語"), generateHash("genre", "アクション"), ("attr", "アクション", 0.7)) :: edge
+    edge = (generateHash("product", "劇場版 魔法少女まどか☆マギカ [後編] 永遠の物語"), generateHash("genre", "アクション"), ("attr", "アクション", 0.7)) :: edge
+    edge = (generateHash("product", "第1話 艦隊これくしょん-艦これ-"), generateHash("genre", "2010年代"), ("attr", "2010年代", 0.7)) :: edge
+    edge = (generateHash("product", "艦隊これくしょん-艦これ- 第1巻 限定版 【DMMオリジナル特典付き】（ブルーレイディスク）"), generateHash("genre", "2010年代"), ("attr", "2010年代", 0.7)) :: edge
+    edge = (generateHash("product", "劇場版 魔法少女まどか☆マギカ [前編] 始まりの物語"), generateHash("genre", "2010年代"), ("attr", "2010年代", 0.7)) :: edge
+    edge = (generateHash("product", "劇場版 魔法少女まどか☆マギカ [後編] 永遠の物語"), generateHash("genre", "2010年代"), ("attr", "2010年代", 0.7)) :: edge
+    edge = (generateHash("product", "第1話 艦隊これくしょん-艦これ-"), generateHash("genre", "テレビ"), ("attr", "テレビ", 0.7)) :: edge
+    edge = (generateHash("product", "艦隊これくしょん-艦これ- 第1巻 限定版 【DMMオリジナル特典付き】（ブルーレイディスク）"), generateHash("genre", "テレビ"), ("attr", "テレビ", 0.7)) :: edge
+    edge = (generateHash("product", "劇場版 魔法少女まどか☆マギカ [前編] 始まりの物語"), generateHash("genre", "魔法少女"), ("attr", "魔法少女", 0.7)) :: edge
+    edge = (generateHash("product", "劇場版 魔法少女まどか☆マギカ [後編] 永遠の物語"), generateHash("genre", "魔法少女"), ("attr", "魔法少女", 0.7)) :: edge
+    edge = (generateHash("product", "劇場版 魔法少女まどか☆マギカ [前編] 始まりの物語"), generateHash("genre", "劇場版（アニメ映画）"), ("attr", "劇場版（アニメ映画）", 0.7)) :: edge
+    edge = (generateHash("product", "劇場版 魔法少女まどか☆マギカ [後編] 永遠の物語"), generateHash("genre", "劇場版（アニメ映画）"), ("attr", "劇場版（アニメ映画）", 0.7)) :: edge
+    edge = (generateHash("product", "艦隊これくしょん-艦これ- 第1巻 限定版 【DMMオリジナル特典付き】（ブルーレイディスク）"), generateHash("genre", "SF/ファンタジー"), ("attr", "SF/ファンタジー", 0.7)) :: edge
+    edge = (generateHash("product", "劇場版 魔法少女まどか☆マギカ [前編] 始まりの物語"), generateHash("genre", "SF/ファンタジー"), ("attr", "SF/ファンタジー", 0.7)) :: edge
+    edge = (generateHash("product", "劇場版 魔法少女まどか☆マギカ [後編] 永遠の物語"), generateHash("genre", "SF/ファンタジー"), ("attr", "SF/ファンタジー", 0.7)) :: edge
     
     // Build the initial Graph
-    val graph = Graph(nodes, edges)
-    val newGraph = calcGenreWordRelation(graph);
-    newGraph.vertices.filter(v => v._2._1 == "genre")
-    .map( v => {
-        val genreId = v._1
-        val genreName = v._2._2
-        val wordRelations = v._2._4._1
-        (genreId, genreName, wordRelations.filter(p => p._2._2 > 0.3))
+    val graph = createGraph(sc, edge)
+    val newGraph = calcGenreWordRelation(graph)
+    newGraph.triplets.filter(t => t.attr._1 == "attr")
+    .map( t => {
+        val genreId = t.dstId
+        val wordRelations = t.dstAttr._1
+        (genreId, wordRelations.filter(p => p._2._3 > 0.3))
       })
     .collect.foreach(println(_))
     

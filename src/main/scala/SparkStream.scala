@@ -20,6 +20,8 @@ import org.apache.spark.mllib.regression.LabeledPoint
 
 import scala.collection.JavaConverters._
 import org.apache.spark._
+import org.apache.spark.graphx._
+import org.apache.spark.rdd.RDD
 //import org.apache.spark.streaming.twitter._
 import org.apache.spark.SparkConf
 import org.apache.log4j.Logger
@@ -57,6 +59,7 @@ val http = new Http()
     System.setProperty("twitter4j.oauth.accessTokenSecret", config.getString("twitter.accessTokenSecret"))
     val conf = new SparkConf().setAppName("SparkStream")
     val ssc = new StreamingContext(conf, Seconds(5))
+    val sc = ssc.sparkContext
     val filter = new FilterQuery
     val locations = Array(Array( 122.87d,24.84d ),Array(153.01d,46.80d))
     filter.locations(locations)
@@ -96,32 +99,51 @@ val http = new Http()
       * 1時間分のvertexとedgeを返す
       * Array[count,((uniqueID,Type,Name),(From,To,Score)]
       */
-    var m_table = scala.collection.mutable.HashMap.empty[String,(String,String)]
-    var edge = List.empty[(String,String,Any)]
+    var m_table = scala.collection.mutable.HashMap.empty[Long, (String, String)]
+    var edgeRDD = sc.parallelize(Array.empty[Edge[(String, String, Double)]])
     var graphBaseData = perOneHours.map( row =>{
         val (count,(list,word)) = row
-
-        val word_digest = MessageDigest.getInstance("MD5").digest(word.getBytes).map("%02x".format(_)).mkString
+        var edgeList = List.empty[Edge[(String, String, Double)]]
+        val word_digest = GraphX.generateHash("word", word)
 	if(!m_table.contains(word_digest)){
-		m_table += word_digest -> ("word",word)
+		m_table += word_digest -> ("word", word)
 	}
 	list.map( products =>{
-		val (word,title,ganre,score) = products
-		val product_digest = MessageDigest.getInstance("MD5").digest(title.getBytes).map("%02x".format(_)).mkString
+		val (word, title, genre, score) = products
+		val product_digest = GraphX.generateHash("product", title)
 		if(!m_table.contains(product_digest)){
-			m_table += word_digest -> ("product",title)
+			m_table += product_digest -> ("product", title)
 		}
-		val ganre_digest = MessageDigest.getInstance("MD5").digest(ganre.getBytes).map("%02x".format(_)).mkString
-		if(!m_table.contains(product_digest)){
-			m_table += word_digest -> ("ganre",ganre)
+		val genre_digest = GraphX.generateHash("genre", genre)
+		if(!m_table.contains(genre_digest)){
+			m_table += genre_digest -> ("genre", genre)
 		}
-		edge = edge ::: List((word_digest,product_digest,score))
-		edge = edge ::: List((product_digest,ganre_digest,score))
+                try {
+                  edgeList = Edge(word_digest, product_digest, ("search", word, score.toDouble)) :: edgeList
+                  edgeList = Edge(product_digest, genre_digest, ("attr", genre, score.toDouble)) :: edgeList
+                } catch {
+                  // CSVパースのミス
+                  case _: Throwable => None
+                }
 	})
-	(count)
-    }).print()
-    
-
+      edgeList
+    }).foreachRDD(rdd => {
+//      edgeRDD = edgeRDD ++ rdd.flatMap(x => x)
+//      edgeRDD.collect.foreach(println(_))
+      edgeRDD = rdd.flatMap(x => x)
+      val graph = Graph.fromEdges(edgeRDD, GraphX.initialMessage)
+      val newGraph = GraphX.calcGenreWordRelation(graph);
+      newGraph.triplets.filter(t => t.attr._1 == "attr")
+      .map( t => {
+          val genreId = t.dstId
+          val wordRelations = t.dstAttr._1
+          (genreId, wordRelations.filter(p => p._2._3 > 10))
+        })
+      .filter( t => t._2.nonEmpty)
+      .collect.foreach(println(_))
+      println("----------------------------")
+    })
+  
     
 //    val graph = statuses.map(fields => (findShipName(account_map_list, fields._1, fields._2), textConverter(keywords, shipNames, fields._2)))
 //            .flatMap(fields => fields._2.map(fields._1 + "dmtc_separator" + _))
