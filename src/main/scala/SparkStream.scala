@@ -142,6 +142,11 @@ val http = new Http()
           wordRelations.filter({ case (id, (word, genre, score)) => genre != "" && score > 0.5}).values
         })
       .filter( t => t.nonEmpty)
+      .map( t => {
+          val genre = t.head._2
+          val words = t.map({ case (word, genre, score) => (word, score) })
+          (genre, words)
+        })
       .collect.foreach(println(_))
       println("----------------------------")
     })
