@@ -154,24 +154,23 @@ object SparkStream {
    */
   def kuromojiParser(text: String, id:Long): List[String] = {
     //@todo modified tokenize
-    val tokenizer = Tokenizer.builder.mode(Tokenizer.Mode.NORMAL).build
+    val tokenizer = UserDic.getInstance()
     //val tokenizer = Tokenizer.builder.userDictionary("/tmp/dmm_userdict.txt").build
     val tokens = tokenizer.tokenize(text).toArray
     val result = tokens
-      .filter { t =>
-        val token = t.asInstanceOf[Token]
-
-        token.getPartOfSpeech.indexOf("名詞") > -1 && token.getPartOfSpeech.indexOf("一般") > -1 
-//        token.getPartOfSpeech.indexOf("名詞") > -1 
+      .map { token => token.asInstanceOf[Token] }
+      .collect { case token if {
+            val partOfSpeech = token.getPartOfSpeech
+            val normalNoun = (partOfSpeech.indexOf("名詞") > -1 && partOfSpeech.indexOf("一般") > -1)
+            val customNoun = partOfSpeech.indexOf("カスタム名詞") > -1
+            normalNoun || customNoun } =>
+         token.asInstanceOf[Token].getSurfaceForm
       }
-      .map(t => t.asInstanceOf[Token].getSurfaceForm)
-      .filter{ v =>
-	v.length > 1 && !(v matches "^[a-zA-Z]+$|^[0-9]+$")
-      }
+      .filter{ v => v.length >= 4 && !(v matches "^[a-zA-Z]+$|^[0-9]+$") }
       .toList
     result.length match {
       case 0 => List.empty[String]
-      case _ => List( result.last)
+      case _ => result
     }
   }
 }

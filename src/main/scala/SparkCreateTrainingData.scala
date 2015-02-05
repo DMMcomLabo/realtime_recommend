@@ -62,8 +62,10 @@ val http = new Http()
     val conf = new SparkConf().setAppName("SparkStream")
     val ssc = new StreamingContext(conf, Seconds(5))
     val filter = new FilterQuery
-    val locations = Array(Array( 122.87d,24.84d ),Array(153.01d,46.80d))
-    filter.locations(locations)
+    //val locations = Array(Array( 122.87d,24.84d ),Array(153.01d,46.80d))
+    //filter.locations(locations)
+    val track = Array("#kurobas","#dp_anime","#暗殺教室","#jojo_anime","#konodan","#drrr_anime","#夜ヤッター","#falgaku","#みりたり","#rollinggirls","#milkyholmes","#aldnoahzero","#shohari","#fafner","#mikagesha","#ISUCA","#fafnir_a","#koufukug","#tkg_anime","#艦これ","#yamato2199","#ぱんきす","#boueibu","#shinmaimaou","#maria_anime","#ワルブレ_A","#yurikuma","#dogdays","#saekano","#garupan","#abso_duo","#anisama","#imas_cg","#1kari","#monogatari","#cfvanguard","#実在性ミリオンアーサー","#teamdayan","#anime_dayan", "#dayan","#nekonodayan","#morikawa3","#donten","#kiseiju_anime","#loghorizon","#pp_anime")
+    filter.track(track)
     
     val tweets = TwitterDmmUtils.createStream(ssc, None,filter)
     /**
@@ -76,17 +78,29 @@ val http = new Http()
 	 (kuromojiList)
 	})
     .map( row =>{
-                val list = wordSearch(row).split("\n")
-		list.drop(1).length match{
-			case 0 =>
-			case x =>{
-				list(ceil(x/2).toInt)
+		val word_list = row._2.split(",").map(word =>{
+	                val list = wordSearch(word).split("\n")
+			val middle = list.drop(1).length match{
+				case 0 => 0L
+				case x =>{
+					list(ceil(x/2).toInt)
+				}
 			}
-		}
-	//(row,list.drop(1).mkString("::"))
-	(row,list(0))
+			(word,middle)
+		})
+	(row._1.replace("\r","").replace("\n",""),word_list)
+	}).map( row =>{
+		val (origin,word_score) = row
+		var words = List.empty[String]
+		var scores = List.empty[Any]
+		word_score.map( item =>{
+			words = words :+ item._1
+			scores = scores :+ item._2
+		})
+		origin + ",[" + words.mkString("::") +"], " + scores.zipWithIndex.map{ case (raw,i) => i+":"+raw}.mkString(" ")
 	})
-    statuses.print()
+    statuses.saveAsTextFiles("hdfs:///tmp/training_ext.txt")
+    statuses.print
     /**
      * 1時間分のtweetの集計countの降順
      * <1時間分のcount> ,(<userID[:UserID]> ,<ワード>)
@@ -199,23 +213,34 @@ val http = new Http()
   /**
    * tweet to word list
    */
-  def kuromojiParser(text: String, id:Long): List[String] = {
+  def kuromojiParser(text: String, id:Long): List[(String,String)] = {
     //@todo modified tokenize
-    val tokenizer = Tokenizer.builder.mode(Tokenizer.Mode.NORMAL).build
+//    val tokenizer = Tokenizer.builder.mode(Tokenizer.Mode.NORMAL).build
+    val tokenizer = UserDic.getInstance()
     //val tokenizer = Tokenizer.builder.userDictionary("/tmp/dmm_userdict.txt").build
     val tokens = tokenizer.tokenize(text).toArray
     val result = tokens
       .filter { t =>
         val token = t.asInstanceOf[Token]
 
-        token.getPartOfSpeech.indexOf("名詞") > -1 && token.getPartOfSpeech.indexOf("一般") > -1  && token.getSurfaceForm.length > 1 && !(token.getSurfaceForm matches "^[a-zA-Z]+$|^[0-9]+$")
+        ((token.getPartOfSpeech.indexOf("名詞") > -1 && token.getPartOfSpeech.indexOf("一般") > -1) || token.getPartOfSpeech.indexOf("カスタム名詞") > -1 )  && token.getSurfaceForm.length > 1 && !(token.getSurfaceForm matches "^[a-zA-Z]+$|^[0-9]+$")
 //        token.getPartOfSpeech.indexOf("名詞") > -1 
       }
       .map(t => t.asInstanceOf[Token].getSurfaceForm)
 
     result.length match {
-      case 0 => List.empty[String]
-      case _ => List(result.mkString(","))
+      case 0 => List.empty[(String,String)]
+      case _ => List((text,result.mkString(",")))
     }
   }
+}
+class UserDic private(){}
+object UserDic{
+	private val dictionary:Tokenizer = Tokenizer.builder.userDictionary("/tmp/dmm_userdict.txt").build
+	def getInstance():Tokenizer={
+		dictionary
+	}
+	def apply():Tokenizer={
+		getInstance
+	}
 }
