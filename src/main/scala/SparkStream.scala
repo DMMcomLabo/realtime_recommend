@@ -101,28 +101,17 @@ val http = new Http()
       * 1時間分のvertexとedgeを返す
       * Array[count,((uniqueID,Type,Name),(From,To,Score)]
       */
-    var m_table = scala.collection.mutable.HashMap.empty[Long, (String, String)]
-    var edgeRDD = sc.parallelize(Array.empty[Edge[(String, String, Double)]])
-    var graphBaseData = perOneHours.map( row =>{
+    var graphBaseData = perOneHours.map( row => {
         val (count,(list,word)) = row
-        var edgeList = List.empty[Edge[(String, String, Double)]]
+        val edgeList = scala.collection.mutable.ArrayBuffer.empty[Edge[GraphX.EdgeProperties]]
         val word_digest = GraphX.generateHash("word", word)
-	if(!m_table.contains(word_digest)){
-		m_table += word_digest -> ("word", word)
-	}
-	list.map( products =>{
+	list.map( products => {
 		val (word, title, genre, score) = products
 		val product_digest = GraphX.generateHash("product", title)
-		if(!m_table.contains(product_digest)){
-			m_table += product_digest -> ("product", title)
-		}
 		val genre_digest = GraphX.generateHash("genre", genre)
-		if(!m_table.contains(genre_digest)){
-			m_table += genre_digest -> ("genre", genre)
-		}
                 try {
-                  edgeList = Edge(word_digest, product_digest, ("search", word, score.toDouble)) :: edgeList
-                  edgeList = Edge(product_digest, genre_digest, ("attr", genre, score.toDouble)) :: edgeList
+                  edgeList += Edge(word_digest, product_digest, ("search", word, score.toDouble))
+                  edgeList += Edge(product_digest, genre_digest, ("attr", genre, score.toDouble))
                 } catch {
                   // CSVパースのミス
                   case _: Throwable => None
@@ -130,12 +119,10 @@ val http = new Http()
 	})
       edgeList
     }).foreachRDD(rdd => {
-//      edgeRDD = edgeRDD ++ rdd.flatMap(x => x)
-//      edgeRDD.collect.foreach(println(_))
       edgeRDD = rdd.flatMap(x => x)
       val graph = Graph.fromEdges(edgeRDD, GraphX.initialMessage)
-      val newGraph = GraphX.calcGenreWordRelation(graph);
-      newGraph.vertices.filter(v => v._2._2 == "genre")
+      val clustedGraph = GraphX.calcGenreWordRelation(graph);
+      clustedGraph.vertices.filter(v => v._2._2 == "genre")
       .map( v => {
           val genreId = v._1
           val wordRelations = v._2._1
