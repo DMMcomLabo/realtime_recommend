@@ -42,7 +42,7 @@ import org.atilika.kuromoji.Tokenizer
 import org.atilika.kuromoji.Token
 
 import java.util.regex._
-import java.net.{URI,URLDecoder,URLEncoder}
+import java.net.{ URI, URLDecoder, URLEncoder }
 import java.security.MessageDigest
 
 import com.typesafe.config.ConfigFactory
@@ -50,10 +50,10 @@ import com.typesafe.config.ConfigFactory
 object SparkStream {
   // (title, genre, score)
   type Product = (String, String, Double)
-  
+
   val http = new Http()
-  
-  def main(args: Array[String]){
+
+  def main(args: Array[String]) {
     val config = ConfigFactory.load()
     Logger.getLogger("org").setLevel(Level.WARN)
     System.setProperty("twitter4j.oauth.consumerKey", config.getString("twitter.consumerKey"))
@@ -64,70 +64,76 @@ object SparkStream {
     val ssc = new StreamingContext(conf, Seconds(5))
     val sc = ssc.sparkContext
     val filter = new FilterQuery
-//    val locations = Array(Array( 122.87d,24.84d ),Array(153.01d,46.80d))
-//    filter.locations(locations)
-    val track = Array("#kurobas","#dp_anime","#暗殺教室","#jojo_anime","#konodan","#drrr_anime","#夜ヤッター","#falgaku","#みりたり","#rollinggirls","#milkyholmes","#aldnoahzero","#shohari","#fafner","#mikagesha","#ISUCA","#fafnir_a","#koufukug","#tkg_anime","#艦これ","#yamato2199","#ぱんきす","#boueibu","#shinmaimaou","#maria_anime","#ワルブレ_A","#yurikuma","#dogdays","#saekano","#garupan","#abso_duo","#anisama","#imas_cg","#1kari","#monogatari","#cfvanguard","#実在性ミリオンアーサー","#teamdayan","#anime_dayan", "#dayan","#nekonodayan","#morikawa3","#donten","#kiseiju_anime","#loghorizon","#pp_anime")
+    //    val locations = Array(Array( 122.87d,24.84d ),Array(153.01d,46.80d))
+    //    filter.locations(locations)
+    val track = Array("#kurobas", "#dp_anime", "#暗殺教室", "#jojo_anime", "#konodan", "#drrr_anime", "#夜ヤッター", "#falgaku", "#みりたり", "#rollinggirls", "#milkyholmes", "#aldnoahzero", "#shohari", "#fafner", "#mikagesha", "#ISUCA", "#fafnir_a", "#koufukug", "#tkg_anime", "#艦これ", "#yamato2199", "#ぱんきす", "#boueibu", "#shinmaimaou", "#maria_anime", "#ワルブレ_A", "#yurikuma", "#dogdays", "#saekano", "#garupan", "#abso_duo", "#anisama", "#imas_cg", "#1kari", "#monogatari", "#cfvanguard", "#実在性ミリオンアーサー", "#teamdayan", "#anime_dayan", "#dayan", "#nekonodayan", "#morikawa3", "#donten", "#kiseiju_anime", "#loghorizon", "#pp_anime")
     filter.track(track)
-    
+
     val tweets = TwitterDmmUtils.createStream(ssc, None, filter)
     /**
-      * 5秒分のtweet
-      * <word>, (Array[Product], count = 1)
-      */
+     * 5秒分のtweet
+     * <word>, (Array[Product], count = 1)
+     */
     val statuses = tweets.flatMap { status =>
-	    kuromojiParser(status.getText, status.getId)
-	} .map { word =>
-            val searchResultCSV = wordSearch(word).split("\n")
-            val products:Array[Product] =
-              searchResultCSV.drop(1).map { row =>
-                  val cols = row.split(",")
-                  val (title, genre) = (cols(0), cols(1))
-                  val score = allCatch opt cols(2).toDouble getOrElse(0.0)
-                  (title, genre, score)
-              } .filter { case (title, genre, score) => score > 0.0 }
-            (word, (products, 1))
-	}
-//    statuses.print()
+      kuromojiParser(status.getText, status.getId)
+    }.map { word =>
+      val searchResultCSV = wordSearch(word).split("\n")
+      val products: Array[Product] =
+        searchResultCSV.drop(1).map { row =>
+          val cols = row.split(",")
+          val (title, genre) = (cols(0), cols(1))
+          val score = allCatch opt cols(2).toDouble getOrElse (0.0)
+          (title, genre, score)
+        }.filter { case (title, genre, score) => score > 0.0 }
+      (word, (products, 1))
+    }
+    //    statuses.print()
     /**
      * 1時間分のtweetの集計countの降順
      * <1時間分のcount>, (Array[Product], <ワード>)
      */
-    val perOneHours = statuses.reduceByKeyAndWindow( 
-      { case ((products1:Array[Product], count1:Int),
-              (products2:Array[Product], count2:Int)) =>
+    val perOneHours = statuses.reduceByKeyAndWindow(
+      {
+        case ((products1: Array[Product], count1: Int),
+          (products2: Array[Product], count2: Int)) =>
           (products1, count1 + count2)
-      }, Minutes(60)).map {
-          case(word, (products, count)) => (count, (products, word))
+      }, Minutes(60)
+    ).map {
+        case (word, (products, count)) => (count, (products, word))
       }.transform(_.sortByKey(false))
-//    perOneHours.print()
-     /**
-      * 1時間分のGraphを生成する
-      */
-    val graphBaseData = perOneHours.flatMap { case (count, (products, word)) =>
+    //    perOneHours.print()
+    /**
+     * 1時間分のGraphを生成する
+     */
+    val graphBaseData = perOneHours.flatMap {
+      case (count, (products, word)) =>
         val word_digest = GraphX.generateHash("word", word)
-        products.toList.flatMap { case (title, genre, score) =>
+        products.toList.flatMap {
+          case (title, genre, score) =>
             val product_digest = GraphX.generateHash("product", title)
             val genre_digest = GraphX.generateHash("genre", genre)
             List(
-                Edge(word_digest, product_digest, ("search", word, score)),
-                Edge(product_digest, genre_digest, ("attr", genre, score))
+              Edge(word_digest, product_digest, ("search", word, count, score)),
+              Edge(product_digest, genre_digest, ("attr", genre, 1, score))
             )
         }
     } foreachRDD { edgeRDD =>
       val graph = Graph.fromEdges(edgeRDD, GraphX.initialMessage)
       val clustedGraph = GraphX.calcGenreWordRelation(graph)
       clustedGraph.vertices.filter(v => v._2._2 == "genre")
-      .map { v => 
+        .map { v =>
           val genreId = v._1
           val wordRelations = v._2._1
-          wordRelations.filter({ case (id, (word, genre, score)) => genre != "" && score > 0.5}).values
-        }
-      .collect { case t if t.nonEmpty =>
-          val genre = t.head._2
-          val words = t.map({ case (word, genre, score) => (word, score) })
-          (genre, words)
-        }
-      .collect.foreach(println(_))
+          wordRelations.filter {
+            case (id, (word, genre, count, score)) =>
+              genre != "" && score > 0.5 && count >= 3
+          }.values
+        }.collect {
+          case t if t.nonEmpty =>
+            val genre = t.head._2
+            val words = t.map({ case (word, genre, count, score) => (word, count, score) })
+            (genre, words)
+        }.collect.foreach(println(_))
       println("----------------------------")
     }
 
@@ -139,8 +145,8 @@ object SparkStream {
   /**
    * search from solr
    */
-  def wordSearch(text:String): String = {
-    val encodeText = URLEncoder.encode(text,"UTF-8")
+  def wordSearch(text: String): String = {
+    val encodeText = URLEncoder.encode(text, "UTF-8")
     val request = url("http://vmsvr004:8888/solr/dmm/select?start=0&rows=30&defType=edismax&fl=title,genre,score&fq=-service:mono&qf=title_ja%5E30.0%20title_cjk%5E12.0%20subtitle_ja%5E20.0%20subtitle_cjk%5E8.0%20comment_ja%5E0.1%20comment_cjk%5E0.1&q=" + encodeText + "&wt=csv")
     val response = http(request OK as.String)
     response.onComplete {
@@ -152,21 +158,23 @@ object SparkStream {
   /**
    * tweet to word list
    */
-  def kuromojiParser(text: String, id:Long): List[String] = {
+  def kuromojiParser(text: String, id: Long): List[String] = {
     //@todo modified tokenize
     val tokenizer = UserDic.getInstance()
     //val tokenizer = Tokenizer.builder.userDictionary("/tmp/dmm_userdict.txt").build
     val tokens = tokenizer.tokenize(text).toArray
     val result = tokens
       .map { token => token.asInstanceOf[Token] }
-      .collect { case token if {
-            val partOfSpeech = token.getPartOfSpeech
-            val normalNoun = (partOfSpeech.indexOf("名詞") > -1 && partOfSpeech.indexOf("一般") > -1)
-            val customNoun = partOfSpeech.indexOf("カスタム名詞") > -1
-            normalNoun || customNoun } =>
-         token.asInstanceOf[Token].getSurfaceForm
+      .collect {
+        case token if {
+          val partOfSpeech = token.getPartOfSpeech
+          val normalNoun = (partOfSpeech.indexOf("名詞") > -1 && partOfSpeech.indexOf("一般") > -1)
+          val customNoun = partOfSpeech.indexOf("カスタム名詞") > -1
+          normalNoun || customNoun
+        } =>
+          token.asInstanceOf[Token].getSurfaceForm
       }
-      .filter{ v => v.length >= 4 && !(v matches "^[a-zA-Z]+$|^[0-9]+$") }
+      .filter { v => v.length >= 4 && !(v matches "^[a-zA-Z]+$|^[0-9]+$") }
       .toList
     result.length match {
       case 0 => List.empty[String]
