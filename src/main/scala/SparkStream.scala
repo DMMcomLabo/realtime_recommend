@@ -119,7 +119,7 @@ val http = new Http()
 	})
       edgeList
     }).foreachRDD(rdd => {
-      edgeRDD = rdd.flatMap(x => x)
+      val edgeRDD = rdd.flatMap(x => x)
       val graph = Graph.fromEdges(edgeRDD, GraphX.initialMessage)
       val clustedGraph = GraphX.calcGenreWordRelation(graph);
       clustedGraph.vertices.filter(v => v._2._2 == "genre")
