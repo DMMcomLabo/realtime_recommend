@@ -35,6 +35,7 @@ import dispatch.Defaults._
 import scala.concurrent._
 import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.duration._
+import scala.util.control.Exception._
 import scala.util.{ Try, Success, Failure }
 
 import org.atilika.kuromoji.Tokenizer
@@ -47,9 +48,11 @@ import java.security.MessageDigest
 import com.typesafe.config.ConfigFactory
 
 object SparkStream {
-
-val http = new Http()
-
+  // (title, genre, score)
+  type Product = (String, String, Double)
+  
+  val http = new Http()
+  
   def main(args: Array[String]){
     val config = ConfigFactory.load()
     Logger.getLogger("org").setLevel(Level.WARN)
@@ -66,164 +69,73 @@ val http = new Http()
     val track = Array("#kurobas","#dp_anime","#暗殺教室","#jojo_anime","#konodan","#drrr_anime","#夜ヤッター","#falgaku","#みりたり","#rollinggirls","#milkyholmes","#aldnoahzero","#shohari","#fafner","#mikagesha","#ISUCA","#fafnir_a","#koufukug","#tkg_anime","#艦これ","#yamato2199","#ぱんきす","#boueibu","#shinmaimaou","#maria_anime","#ワルブレ_A","#yurikuma","#dogdays","#saekano","#garupan","#abso_duo","#anisama","#imas_cg","#1kari","#monogatari","#cfvanguard","#実在性ミリオンアーサー","#teamdayan","#anime_dayan", "#dayan","#nekonodayan","#morikawa3","#donten","#kiseiju_anime","#loghorizon","#pp_anime")
     filter.track(track)
     
-    val tweets = TwitterDmmUtils.createStream(ssc, None,filter)
+    val tweets = TwitterDmmUtils.createStream(ssc, None, filter)
     /**
       * 5秒分のtweet
-      * <word>,(Array[(word,title,ganre,score)],1)
+      * <word>, (Array[Product], count = 1)
       */
-    val statuses = tweets.flatMap(status =>{
-	    val kuromojiList = kuromojiParser(status.getText,status.getId)
-	 (kuromojiList)
-	}).map{row =>{
-		val list = wordSearch(row).split("\n")
-		val a = list.drop(1).map( t =>{
-			val cols = t.split(",")
-			(row,cols(0),cols(1),cols(2))
-		})
-	
-		(row,(a,1))
-	}}
+    val statuses = tweets.flatMap { status =>
+	    kuromojiParser(status.getText, status.getId)
+	} .map { word =>
+            val searchResultCSV = wordSearch(word).split("\n")
+            val products:Array[Product] =
+              searchResultCSV.drop(1).map { row =>
+                  val cols = row.split(",")
+                  val (title, genre) = (cols(0), cols(1))
+                  val score = allCatch opt cols(2).toDouble getOrElse(0.0)
+                  (title, genre, score)
+              } .filter { case (title, genre, score) => score > 0.0 }
+            (word, (products, 1))
+	}
 //    statuses.print()
     /**
      * 1時間分のtweetの集計countの降順
-     * <1時間分のcount> ,(Array[(word,title,ganre,score)],<ワード>)
+     * <1時間分のcount>, (Array[Product], <ワード>)
      */
-    //val perOneHours = statuses.reduceByKeyAndWindow((a:(String,Int),b:(String,Int)) =>{(a._1+":"+b._1,a._2+b._2)},Minutes(60)).map{
-    //		 case(a,b) => (b._2,(b._1,a))
-    val perOneHours = statuses.reduceByKeyAndWindow( (a:(Array[Tuple4[String,String,String,String]],Int),b:(Array[Tuple4[String,String,String,String]],Int)) =>{
-		val c = a._1
-		(c,a._2+b._2)
-	},Minutes(60)).map{
-		 case(a,b) => (b._2,(b._1,a))
-	}.transform(_.sortByKey(false))
+    val perOneHours = statuses.reduceByKeyAndWindow( 
+      { case ((products1:Array[Product], count1:Int),
+              (products2:Array[Product], count2:Int)) =>
+          (products1, count1 + count2)
+      }, Minutes(60)).map {
+          case(word, (products, count)) => (count, (products, word))
+      }.transform(_.sortByKey(false))
 //    perOneHours.print()
      /**
-      * 1時間分のvertexとedgeを返す
-      * Array[count,((uniqueID,Type,Name),(From,To,Score)]
+      * 1時間分のGraphを生成する
       */
-    var graphBaseData = perOneHours.map( row => {
-        val (count,(list,word)) = row
-        val edgeList = scala.collection.mutable.ArrayBuffer.empty[Edge[GraphX.EdgeProperties]]
+    val graphBaseData = perOneHours.flatMap { case (count, (products, word)) =>
         val word_digest = GraphX.generateHash("word", word)
-	list.map( products => {
-		val (word, title, genre, score) = products
-		val product_digest = GraphX.generateHash("product", title)
-		val genre_digest = GraphX.generateHash("genre", genre)
-                try {
-                  edgeList += Edge(word_digest, product_digest, ("search", word, score.toDouble))
-                  edgeList += Edge(product_digest, genre_digest, ("attr", genre, score.toDouble))
-                } catch {
-                  // CSVパースのミス
-                  case _: Throwable => None
-                }
-	})
-      edgeList
-    }).foreachRDD(rdd => {
-      val edgeRDD = rdd.flatMap(x => x)
+        products.toList.flatMap { case (title, genre, score) =>
+            val product_digest = GraphX.generateHash("product", title)
+            val genre_digest = GraphX.generateHash("genre", genre)
+            List(
+                Edge(word_digest, product_digest, ("search", word, score)),
+                Edge(product_digest, genre_digest, ("attr", genre, score))
+            )
+        }
+    } foreachRDD { edgeRDD =>
       val graph = Graph.fromEdges(edgeRDD, GraphX.initialMessage)
-      val clustedGraph = GraphX.calcGenreWordRelation(graph);
+      val clustedGraph = GraphX.calcGenreWordRelation(graph)
       clustedGraph.vertices.filter(v => v._2._2 == "genre")
-      .map( v => {
+      .map { v => 
           val genreId = v._1
           val wordRelations = v._2._1
           wordRelations.filter({ case (id, (word, genre, score)) => genre != "" && score > 0.5}).values
-        })
-      .filter( t => t.nonEmpty)
-      .map( t => {
+        }
+      .collect { case t if t.nonEmpty =>
           val genre = t.head._2
           val words = t.map({ case (word, genre, score) => (word, score) })
           (genre, words)
-        })
+        }
       .collect.foreach(println(_))
       println("----------------------------")
-    })
-  
-    
-//    val graph = statuses.map(fields => (findShipName(account_map_list, fields._1, fields._2), textConverter(keywords, shipNames, fields._2)))
-//            .flatMap(fields => fields._2.map(fields._1 + "dmtc_separator" + _))
-//    graph.foreachRDD(rdd => rdd.foreach(t => publishMQ(t)))
-//    val tokenizer = Tokenizer.builder.mode(Tokenizer.Mode.NORMAL).build
-//ハッシュタグで抜き出し
-//    val words = statuses.flatMap{status => tokenizer.tokenize(status).toArray}
-//    words.foreach { t =>
-// 	val token = t.asInstanceOf[Token]
-//	println(s"$token.getSurfaceFrom} - $token.getAllFeatures}")
-//    }
-//    val hashtags = words.filter(word => word.startsWith("#"))
-//    val counts = hashtags.countByValueAndWindow(Seconds(60 * 5), Seconds(1))
-//                         .map { case(tag, count) => (count, tag) }
-//    counts.foreach(rdd => println(rdd.top(10).mkString("\n")))
+    }
 
     ssc.checkpoint("checkpoint")
     ssc.start()
     ssc.awaitTermination()
   }
-  
-//  def findShipName(data: List[(Long, String)], key: Long, text: String): String = {
-//    val result = data.filter(_._1 == key)
-//    result.length match {
-//      case 0 => getKanmusuName(text)
-//      case _ => result(0)._2
-//    }
-//  }
-//  def combiner(a: List[String], b: List[String]): List[String] = {
-//    a.length match {
-//      case 0 => combiner(List(""), b)
-//      case _ => b.length match {
-//          case 0 => combiner(a, List(""))
-//          case _ => a.map( x => b.map( y => x + "dmtc_separator" + y)).flatten
-//      }
-//    }
-//  }
-//  def textParser(dic: List[String], text: String): List[String] = {
-//    dic.filter(text.indexOf(_) > -1)
-//  }
-//  def textConverter(dic1: List[String], dic2: List[String], text: String): List[String] = {
-//    val simpleKeywordList = textParser(dic1, text)
-//    val simpleKanmusuList = textParser(dic2, text)
-//    val solrKanmusuName = getKanmusuName(text)
-//    println(solrKanmusuName)
-//    val kanmusuList = solrKanmusuName.length match {
-//      case 0 => simpleKanmusuList
-//      case _ => solrKanmusuName :: simpleKanmusuList
-//    }
-//    println(simpleKanmusuList)
-//    println(kanmusuList)
-//    val kuromojiList = kuromojiParser(text)
-//    val keywordList = kuromojiList ::: simpleKeywordList
-//    val graph = combiner(keywordList.distinct, kanmusuList.distinct)
-//    val result = graph.map(_ + "dmtc_separator" + text.replace("\"", "\\\"").replace("\r", "").replace("\n", ""))
-////    println(result)
-//    result
-//  }
-//  def publishMQ(message: String) {
-//    val fields = message.split("dmtc_separator", 4)
-//    val factory = new ConnectionFactory()
-//    factory.setUsername("guest")
-//    factory.setPassword("guest")
-//    factory.setVirtualHost("/")
-//    factory.setHost("vmsvr003")
-//    factory.setPort(5672)
-//    val conn = factory.newConnection()
-//    val channel = conn.createChannel()
-//    val json = "{\"source\": \"" + fields(0) + "\", \"target\": \"" + fields(2) + "\", \"word\": \"" + fields(1) + "\", \"message\": \"" + fields(3) + "\", \"weight\": 1}"
-//    println(json)
-//    fields(0).length + fields(2).length match {
-//      case 0 => println("skip")
-//      case _ => channel.basicPublish("", "kankore", null, json.getBytes())
-//    }
-//    channel.close()
-//    conn.close()
-//  }
-//  def getKanmusuName(text: String):String = {
-//    val solrKanmusuResult = searchKanmusuName(text)
-//    val solrResultList = solrKanmusuResult.replace("\r", "").replace("\n", "").split(",")
-//    val solrKanmusuName = solrResultList.length match {
-//      case 3 => solrResultList(2)
-//      case _ => ""
-//    }
-//    solrKanmusuName
-//  }
+
   /**
    * search from solr
    */
