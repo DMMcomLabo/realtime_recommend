@@ -17,6 +17,12 @@ import org.apache.spark.SparkContext._
 
 import org.apache.spark.mllib.classification.SVMWithSGD
 import org.apache.spark.mllib.regression.LabeledPoint
+import org.apache.spark.mllib.classification.SVMWithSGD
+import org.apache.spark.mllib.evaluation.BinaryClassificationMetrics
+import org.apache.spark.mllib.regression.LabeledPoint
+import org.apache.spark.mllib.linalg.Vectors
+import org.apache.spark.mllib.util.MLUtils
+import math._
 
 import scala.collection.JavaConverters._
 import org.apache.spark._
@@ -79,26 +85,56 @@ object SparkStream {
       "#pp_anime"
     )
     filter.track(track)
+    
+    val learning_data = MLUtils.loadLibSVMFile(sc, "/tmp/sample.data.svm.txt").cache()
+    val model = SVMWithSGD.train(learning_data, 10)
+    model.clearThreshold()
 
     val tweets = TwitterDmmUtils.createStream(ssc, None, filter)
     /**
      * 5秒分のtweet
      * <word>, (Array[Product], count)
      */
-    val statuses = tweets.flatMap { status =>
+    val statuses = tweets.map { status =>
       kuromojiParser(status.getText, status.getId)
-    } map { word => (word, 1)
-    } reduceByKey { _ + _ } map {
-      case (word, count) =>
-        val searchResultCSV = wordSearch(word).split("\n")
-        val products: Array[Product] =
-          searchResultCSV.drop(1).map { row =>
-            val cols = row.split(",")
-            val (title, genre) = (cols(0), cols(1))
-            val score = allCatch opt cols(2).toDouble getOrElse (0.0)
-            (title, genre, score)
-          } filter { case (title, genre, score) => score > 0.0 }
-        (word, (count, products))
+    }.map { case (tweet, words) =>
+        /**
+         * 各単語ごとに商品を検索して、スコアの中央値を計算
+         */
+        val wordsWithProducts = words.map { word =>
+          val searchResultCSV = wordSearch(word).split("\n")
+          val products: Array[Product] =
+            searchResultCSV.drop(1).map { row =>
+              val cols = row.split(",")
+              val (title, genre) = (cols(0), cols(1))
+              val score = allCatch opt cols(2).toDouble getOrElse (0.0)
+              (title, genre, score)
+            } filter { case (title, genre, score) => score > 0.0 }
+          val median = products.length match {
+            case 0 => 0L
+            case n => products(ceil(n/2).toInt)._3
+          }
+          (word, products, median)
+        }
+        /**
+         * 各ツイートごとに、単語を次元とした中央値のベクトルを生成
+         */
+        val svmVector = wordsWithProducts.map {
+           case (word, products, median) => median
+        }
+        val svmPredict = svmVector.length match {
+          case 0 => 0L
+          case n => model.predict(Vectors.dense(svmVector.sum / svmVector.length))
+        }
+        (tweet, wordsWithProducts, svmPredict)
+    }.filter {
+      case (tweet, wordsWithProducts, svmPredict) => svmPredict > 1
+    }.flatMap {
+      case (tweet, wordsWithProducts, svmPredict) => 
+        wordsWithProducts.map {
+          case (word, products, median) =>
+            (word, (1, products))
+        }
     }
     //    statuses.print()
     /**
@@ -112,7 +148,7 @@ object SparkStream {
           (count1 + count2, products1)
       }, Minutes(60)
     )
-    //    perOneHours.print()
+//    perOneHours.print()
     /**
      * 1時間分のGraphを生成する
      */
@@ -170,14 +206,14 @@ object SparkStream {
   /**
    * tweet to word list
    */
-  def kuromojiParser(text: String, id: Long): List[String] = {
+  def kuromojiParser(text: String, id: Long): (String, List[String]) = {
     //@todo modified tokenize
     val tokenizer = UserDic.getInstance()
     //val tokenizer = Tokenizer.builder.userDictionary("/tmp/dmm_userdict.txt").build
     val tokens = tokenizer.tokenize(text).toArray
-    tokens.map { token =>
+    val wordList: List[String] = tokens.map { token =>
       token.asInstanceOf[Token]
-    } collect {
+    }.collect {
       case token if {
         val partOfSpeech = token.getPartOfSpeech
         val normalNoun = (partOfSpeech.indexOf("名詞") > -1 && partOfSpeech.indexOf("一般") > -1)
@@ -185,8 +221,9 @@ object SparkStream {
         normalNoun || customNoun
       } =>
         token.asInstanceOf[Token].getSurfaceForm
-    } filter { v =>
-      (v.length >= 4) && !(v matches "^[a-zA-Z]+$|^[0-9]+$")
-    } toList
+    }.filter { v =>
+      (v.length >= 2) && !(v matches "^[a-zA-Z]+$|^[0-9]+$")
+    }.toList
+    (text, wordList)
   }
 }

@@ -73,7 +73,7 @@ val http = new Http()
       * <word>,(<userId>,1)
       */
     val statuses = tweets.flatMap(status =>{
-	    val kuromojiList = kuromojiParser(status.getText,status.getId)
+	    val kuromojiList = kuromojiParser(status.getText.replaceAll("(https?|ftp)(:\\/\\/[-_.!~*\\'()a-zA-Z0-9;\\/?:\\@&=+\\$,%#]+)",""),status.getId)
 	    //@todo search 
 	 (kuromojiList)
 	})
@@ -97,7 +97,8 @@ val http = new Http()
 			words = words :+ item._1
 			scores = scores :+ item._2
 		})
-		origin + ",[" + words.mkString("::") +"], " + scores.zipWithIndex.map{ case (raw,i) => i+":"+raw}.mkString(" ")
+//		origin + ",[" + words.mkString("::") +"], " + scores.zipWithIndex.map{ case (raw,i) => i+":"+raw}.mkString(" ").replaceAll("[0-9]+:score |\\s[0-9]+:score","")
+		"1 " + scores.zipWithIndex.map{ case (raw,i) => i+":"+raw}.mkString(" ").replaceAll("[0-9]+:score |\\s[0-9]+:score","")
 	})
     statuses.saveAsTextFiles("hdfs:///tmp/training_ext.txt")
     statuses.print
