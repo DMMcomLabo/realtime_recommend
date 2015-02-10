@@ -85,7 +85,7 @@ object SparkStream {
       "#pp_anime"
     )
     filter.track(track)
-    
+
     val learning_data = MLUtils.loadLibSVMFile(sc, "/tmp/sample.data.svm.txt").cache()
     val model = SVMWithSGD.train(learning_data, 10)
     model.clearThreshold()
@@ -97,7 +97,8 @@ object SparkStream {
      */
     val statuses = tweets.map { status =>
       kuromojiParser(status.getText, status.getId)
-    }.map { case (tweet, words) =>
+    }.map {
+      case (tweet, words) =>
         /**
          * 各単語ごとに商品を検索して、スコアの中央値を計算
          */
@@ -111,8 +112,8 @@ object SparkStream {
               (title, genre, score)
             } filter { case (title, genre, score) => score > 0.0 }
           val median = products.length match {
-            case 0 => 0L
-            case n => products(ceil(n/2).toInt)._3
+            case 0 => 0.0
+            case n => products(ceil(n / 2).toInt)._3
           }
           (word, products, median)
         }
@@ -120,17 +121,17 @@ object SparkStream {
          * 各ツイートごとに、単語を次元とした中央値のベクトルを生成
          */
         val svmVector = wordsWithProducts.map {
-           case (word, products, median) => median
+          case (word, products, median) => median
         }
         val svmPredict = svmVector.length match {
-          case 0 => 0L
+          case 0 => 0.0
           case n => model.predict(Vectors.dense(svmVector.sum / svmVector.length))
         }
         (tweet, wordsWithProducts, svmPredict)
     }.filter {
-      case (tweet, wordsWithProducts, svmPredict) => svmPredict > 1
+      case (tweet, wordsWithProducts, svmPredict) => svmPredict > 1.0
     }.flatMap {
-      case (tweet, wordsWithProducts, svmPredict) => 
+      case (tweet, wordsWithProducts, svmPredict) =>
         wordsWithProducts.map {
           case (word, products, median) =>
             (word, (1, products))
@@ -144,11 +145,11 @@ object SparkStream {
     val perOneHours = statuses.reduceByKeyAndWindow(
       {
         case ((count1: Int, products1: Array[Product]),
-          (count2: Int, products2: Array[Product])) =>
+              (count2: Int, products2: Array[Product])) =>
           (count1 + count2, products1)
       }, Minutes(60)
     )
-//    perOneHours.print()
+    //    perOneHours.print()
     /**
      * 1時間分のGraphを生成する
      */
@@ -164,22 +165,24 @@ object SparkStream {
               Edge(product_digest, genre_digest, ("attr", genre, 1, score))
             )
         }
-    } foreachRDD { edgeRDD =>
+    }.foreachRDD { edgeRDD =>
       val graph = Graph.fromEdges(edgeRDD, GraphX.initialMessage)
       val clustedGraph = GraphX.calcGenreWordRelation(graph)
-      clustedGraph.vertices.filter { v =>
-        v._2._2 == "genre"
-      }.map { v =>
-        val genreId = v._1
-        val wordRelations = v._2._1
+      clustedGraph.vertices.filter { vertex =>
+        vertex._2._2 == "genre"
+      }.map { vertex =>
+        val genreId = vertex._1
+        val wordRelations = vertex._2._1
         wordRelations.filter {
           case (id, (word, genre, count, score)) =>
             genre != "" && score > 0.5 && count >= 3
-          }.values
+        }.values
       }.collect {
-        case t if t.nonEmpty =>
-          val genre = t.head._2
-          val words = t.map { case (word, genre, count, score) => (word, count, score) }
+        case wordRelationValues if wordRelationValues.nonEmpty =>
+          val genre = wordRelationValues.head._2
+          val words = wordRelationValues.map {
+            case (word, genre, count, score) => (word, count, score)
+          }
           (genre, words)
       }.collect.foreach(println(_))
       println("----------------------------")
@@ -207,11 +210,10 @@ object SparkStream {
    * tweet to word list
    */
   def kuromojiParser(text: String, id: Long): (String, List[String]) = {
-    //@todo modified tokenize
+    // @todo modified tokenize
     val tokenizer = UserDic.getInstance()
-    //val tokenizer = Tokenizer.builder.userDictionary("/tmp/dmm_userdict.txt").build
     val tokens = tokenizer.tokenize(text).toArray
-    val wordList: List[String] = tokens.map { token =>
+    val wordList = tokens.map { token =>
       token.asInstanceOf[Token]
     }.collect {
       case token if {
@@ -221,8 +223,8 @@ object SparkStream {
         normalNoun || customNoun
       } =>
         token.asInstanceOf[Token].getSurfaceForm
-    }.filter { v =>
-      (v.length >= 2) && !(v matches "^[a-zA-Z]+$|^[0-9]+$")
+    }.filter { word =>
+      (word.length >= 2) && !(word matches "^[a-zA-Z]+$|^[0-9]+$")
     }.toList
     (text, wordList)
   }
