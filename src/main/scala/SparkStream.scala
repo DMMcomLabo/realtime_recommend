@@ -56,7 +56,7 @@ import com.typesafe.config.ConfigFactory
 object SparkStream {
   // (title, genre, score)
   type Product = (String, String, Double)
-
+  
   val http = new Http()
 
   def main(args: Array[String]) {
@@ -156,13 +156,22 @@ object SparkStream {
     val graphBaseData = perOneHours.flatMap {
       case (word, (count, products)) =>
         val word_digest = GraphX.generateHash("word", word)
+        val productList = products.toList.map {
+          case (title, genre, score) =>
+            val product_digest = GraphX.generateHash("product", title)
+            List(
+              product_digest,
+              title,
+              score
+            ).mkString("::::")
+        }.mkString(":::")
         products.toList.flatMap {
           case (title, genre, score) =>
             val product_digest = GraphX.generateHash("product", title)
             val genre_digest = GraphX.generateHash("genre", genre)
             List(
-              Edge(word_digest, product_digest, ("search", word, count, score)),
-              Edge(product_digest, genre_digest, ("attr", genre, 1, score))
+              Edge(word_digest, product_digest, ("search", word, count, score, productList)),
+              Edge(product_digest, genre_digest, ("attr", genre, 1, score, ""))
             )
         }
     }.foreachRDD { edgeRDD =>
@@ -172,18 +181,30 @@ object SparkStream {
         vertex._2._2 == "genre"
       }.map { vertex =>
         val genreId = vertex._1
-        val wordRelations = vertex._2._1
-        wordRelations.filter {
-          case (id, (word, genre, count, score)) =>
+        val wordRelations = vertex._2._1.filter {
+          case (id, (word, genre, count, score, productList)) =>
             genre != "" && score > 0.5 && count >= 3
-        }.values
+        }
+        (genreId, wordRelations)
       }.collect {
-        case wordRelationValues if wordRelationValues.nonEmpty =>
-          val genre = wordRelationValues.head._2
-          val words = wordRelationValues.map {
-            case (word, genre, count, score) => (word, count, score)
+        case genreRow if genreRow._2.nonEmpty =>
+          val (genreId, wordRelations) = genreRow
+          val genre = wordRelations.values.head._2
+          val words = wordRelations.map {
+            case (wordId, (word, genre, count, score, productList)) => 
+              List(
+                wordId,
+                word,
+                count,
+                score,
+                productList
+              ).mkString("::")
           }
-          (genre, words)
+          List(
+            genreId,
+            genre,
+            words.mkString("<>")
+          ).mkString("\t")
       }.collect.foreach(println(_))
       println("----------------------------")
     }
