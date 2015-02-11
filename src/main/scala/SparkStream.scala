@@ -58,9 +58,10 @@ object SparkStream {
   type Product = (String, String, Double)
   
   val http = new Http()
+  val config = ConfigFactory.load()
 
   def main(args: Array[String]) {
-    val config = ConfigFactory.load()
+    
     Logger.getLogger("org").setLevel(Level.WARN)
     System.setProperty("twitter4j.oauth.consumerKey", config.getString("twitter.consumerKey"))
     System.setProperty("twitter4j.oauth.consumerSecret", config.getString("twitter.consumerSecret"))
@@ -163,8 +164,8 @@ object SparkStream {
               product_digest,
               title,
               score
-            ).mkString("::::")
-        }.mkString(":::")
+            ).mkString("::")
+        }.mkString(":-:")
         products.toList.flatMap {
           case (title, genre, score) =>
             val product_digest = GraphX.generateHash("product", title)
@@ -198,13 +199,15 @@ object SparkStream {
                 count,
                 score,
                 productList
-              ).mkString("::")
+              ).mkString(":=:")
           }
-          List(
+          val result = List(
             genreId,
             genre,
             words.mkString("<>")
           ).mkString("\t")
+          publishMQ(result)
+          result.take(100) + "..."
       }.collect.foreach(println(_))
       println("----------------------------")
     }
@@ -249,4 +252,16 @@ object SparkStream {
     }.toList
     (text, wordList)
   }
-}
+  def publishMQ(message: String) {
+    val factory = new ConnectionFactory()
+    factory.setUsername(config.getString("rabbitmq.username"))
+    factory.setPassword(config.getString("rabbitmq.password"))
+    factory.setVirtualHost(config.getString("rabbitmq.virtualHost"))
+    factory.setHost(config.getString("rabbitmq.host"))
+    factory.setPort(config.getInt("rabbitmq.port"))
+    val conn = factory.newConnection()
+    val channel = conn.createChannel()
+    channel.basicPublish("", config.getString("rabbitmq.queue"), null, message.getBytes())
+    channel.close()
+    conn.close()
+  }}
