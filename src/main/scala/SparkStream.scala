@@ -54,8 +54,8 @@ import java.security.MessageDigest
 import com.typesafe.config.ConfigFactory
 
 object SparkStream {
-  // (title, genre, score)
-  type Product = (String, String, Double)
+  // (title, genre, score, imageUrl)
+  type Product = (String, String, Double, String)
   
   val http = new Http()
   val config = ConfigFactory.load()
@@ -103,6 +103,7 @@ object SparkStream {
         /**
          * 各単語ごとに商品を検索して、スコアの中央値を計算
          */
+        val findImage = """(\/[\/\w]+\.(jpg|png))""".r
         val wordsWithProducts = words.map { word =>
           val searchResultCSV = wordSearch(word).split("\n")
           val products: Array[Product] =
@@ -110,8 +111,9 @@ object SparkStream {
               val cols = row.split(",")
               val (title, genre) = (cols(0), cols(1))
               val score = allCatch opt cols(2).toDouble getOrElse (0.0)
-              (title, genre, score)
-            } filter { case (title, genre, score) => score > 0.0 }
+              val image = allCatch opt findImage.findFirstIn(row).head.toString getOrElse("")
+              (title, genre, score, image)
+            } filter { case (title, genre, score, image) => score > 0.0 && image != "" }
           val median = products.length match {
             case 0 => 0.0
             case n => products(ceil(n / 2).toInt)._3
@@ -158,16 +160,17 @@ object SparkStream {
       case (word, (count, products)) =>
         val word_digest = GraphX.generateHash("word", word)
         val productList = products.toList.map {
-          case (title, genre, score) =>
+          case (title, genre, score, image) =>
             val product_digest = GraphX.generateHash("product", title)
             List(
               product_digest,
               title,
-              score
+              score,
+              image
             ).mkString("::")
         }.mkString(":-:")
         products.toList.flatMap {
-          case (title, genre, score) =>
+          case (title, genre, score, image) =>
             val product_digest = GraphX.generateHash("product", title)
             val genre_digest = GraphX.generateHash("genre", genre)
             List(
@@ -222,7 +225,7 @@ object SparkStream {
    */
   def wordSearch(text: String): String = {
     val encodeText = URLEncoder.encode(text, "UTF-8")
-    val request = url("http://vmsvr004:8888/solr/dmm/select?start=0&rows=30&defType=edismax&fl=title,genre,score&fq=-service:mono&qf=title_ja%5E30.0%20title_cjk%5E12.0%20subtitle_ja%5E20.0%20subtitle_cjk%5E8.0%20comment_ja%5E0.1%20comment_cjk%5E0.1&q=" + encodeText + "&wt=csv")
+    val request = url("http://vmsvr004:8888/solr/dmm/select?start=0&rows=30&defType=edismax&fl=title,genre,score,detail&fq=-service:mono&qf=title_ja%5E30.0%20title_cjk%5E12.0%20subtitle_ja%5E20.0%20subtitle_cjk%5E8.0%20comment_ja%5E0.1%20comment_cjk%5E0.1&q=" + encodeText + "&wt=csv")
     val response = http(request OK as.String)
     response.onComplete {
       case Success(msg) => msg
