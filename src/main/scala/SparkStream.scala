@@ -193,7 +193,7 @@ object SparkStream {
           val words = wordRelations.map {
             case (wordId, (word, genre, count, score, productList)) => 
               List(
-                wordId,
+                GraphX.generateHash(genre, word),
                 word,
                 count,
                 score,
