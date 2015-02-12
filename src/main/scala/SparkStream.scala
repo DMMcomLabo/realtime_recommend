@@ -51,17 +51,16 @@ import java.util.regex._
 import java.net.{ URI, URLDecoder, URLEncoder }
 import java.security.MessageDigest
 
-import com.typesafe.config.ConfigFactory
+import com.typesafe.config.{ Config, ConfigFactory }
 
 object SparkStream {
   // (title, genre, score, imageUrl)
   type Product = (String, String, Double, String)
   
   val http = new Http()
-  val config = ConfigFactory.load()
-
+  
   def main(args: Array[String]) {
-    
+    val config = ConfigFactory.load()
     Logger.getLogger("org").setLevel(Level.WARN)
     System.setProperty("twitter4j.oauth.consumerKey", config.getString("twitter.consumerKey"))
     System.setProperty("twitter4j.oauth.consumerSecret", config.getString("twitter.consumerSecret"))
@@ -209,7 +208,7 @@ object SparkStream {
             genre,
             words.mkString("<>")
           ).mkString("\t")
-          publishMQ(result)
+          publishMQ(config, result)
           result.take(100) + "..."
       }.collect.foreach(println(_))
       println("----------------------------")
@@ -255,7 +254,7 @@ object SparkStream {
     }.toList
     (text, wordList)
   }
-  def publishMQ(message: String) {
+  def publishMQ(config: Config, message: String) {
     val factory = new ConnectionFactory()
     factory.setUsername(config.getString("rabbitmq.username"))
     factory.setPassword(config.getString("rabbitmq.password"))
@@ -267,4 +266,5 @@ object SparkStream {
     channel.basicPublish("", config.getString("rabbitmq.queue"), null, message.getBytes())
     channel.close()
     conn.close()
-  }}
+  }
+}
