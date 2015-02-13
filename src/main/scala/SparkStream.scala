@@ -82,7 +82,7 @@ object SparkStream {
       "#abso_duo", "#anisama", "#imas_cg", "#1kari", "#monogatari",
       "#cfvanguard", "#実在性ミリオンアーサー", "#teamdayan", "#anime_dayan", "#dayan",
       "#nekonodayan", "#morikawa3", "#donten", "#kiseiju_anime", "#loghorizon",
-      "#pp_anime"
+      "#pp_anime", "#gレコ", "#なりヒロwww", "#君嘘", "#yuyuyu"
     )
     filter.track(track)
 
@@ -167,7 +167,7 @@ object SparkStream {
               score,
               image
             ).mkString("::")
-        }.mkString(":-:")
+        }.take(5).mkString(":-:")
         products.toList.flatMap {
           case (title, genre, score, image) =>
             val product_digest = GraphX.generateHash("product", title)
@@ -190,7 +190,7 @@ object SparkStream {
         }
         (genreId, wordRelations)
       }.collect {
-        case genreRow if genreRow._2.nonEmpty =>
+        case genreRow if genreRow._2.size >= 3 =>
           val (genreId, wordRelations) = genreRow
           val genre = wordRelations.values.head._2
           val words = wordRelations.map {
@@ -210,7 +210,7 @@ object SparkStream {
           ).mkString("\t")
           publishMQ(config, result)
           result.take(100) + "..."
-      }.collect.foreach(println(_))
+      }.collect.take(3).foreach(println(_))
       println("----------------------------")
     }
 
