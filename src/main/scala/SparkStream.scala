@@ -17,9 +17,17 @@ import org.apache.spark.SparkContext._
 
 import org.apache.spark.mllib.classification.SVMWithSGD
 import org.apache.spark.mllib.regression.LabeledPoint
+import org.apache.spark.mllib.classification.SVMWithSGD
+import org.apache.spark.mllib.evaluation.BinaryClassificationMetrics
+import org.apache.spark.mllib.regression.LabeledPoint
+import org.apache.spark.mllib.linalg.Vectors
+import org.apache.spark.mllib.util.MLUtils
+import math._
 
 import scala.collection.JavaConverters._
 import org.apache.spark._
+import org.apache.spark.graphx._
+import org.apache.spark.rdd.RDD
 //import org.apache.spark.streaming.twitter._
 import org.apache.spark.SparkConf
 import org.apache.log4j.Logger
@@ -33,22 +41,25 @@ import dispatch.Defaults._
 import scala.concurrent._
 import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.duration._
+import scala.util.control.Exception._
 import scala.util.{ Try, Success, Failure }
 
 import org.atilika.kuromoji.Tokenizer
 import org.atilika.kuromoji.Token
 
 import java.util.regex._
-import java.net.{URI,URLDecoder,URLEncoder}
+import java.net.{ URI, URLDecoder, URLEncoder }
 import java.security.MessageDigest
 
-import com.typesafe.config.ConfigFactory
+import com.typesafe.config.{ Config, ConfigFactory }
 
 object SparkStream {
-
-val http = new Http()
-
-  def main(args: Array[String]){
+  // (title, genre, score, imageUrl)
+  type Product = (String, String, Double, String)
+  
+  val http = new Http()
+  
+  def main(args: Array[String]) {
     val config = ConfigFactory.load()
     Logger.getLogger("org").setLevel(Level.WARN)
     System.setProperty("twitter4j.oauth.consumerKey", config.getString("twitter.consumerKey"))
@@ -57,163 +68,163 @@ val http = new Http()
     System.setProperty("twitter4j.oauth.accessTokenSecret", config.getString("twitter.accessTokenSecret"))
     val conf = new SparkConf().setAppName("SparkStream")
     val ssc = new StreamingContext(conf, Seconds(5))
+    val sc = ssc.sparkContext
     val filter = new FilterQuery
-    val locations = Array(Array( 122.87d,24.84d ),Array(153.01d,46.80d))
-    filter.locations(locations)
-    
-    val tweets = TwitterDmmUtils.createStream(ssc, None,filter)
+    //    val locations = Array(Array( 122.87d,24.84d ),Array(153.01d,46.80d))
+    //    filter.locations(locations)
+    val track = Array(
+      "#kurobas", "#dp_anime", "#暗殺教室", "#jojo_anime", "#konodan",
+      "#drrr_anime", "#夜ヤッター", "#falgaku", "#みりたり", "#rollinggirls",
+      "#milkyholmes", "#aldnoahzero", "#shohari", "#fafner", "#mikagesha",
+      "#ISUCA", "#fafnir_a", "#koufukug", "#tkg_anime", "#艦これ",
+      "#yamato2199", "#ぱんきす", "#boueibu", "#shinmaimaou", "#maria_anime",
+      "#ワルブレ_A", "#yurikuma", "#dogdays", "#saekano", "#garupan",
+      "#abso_duo", "#anisama", "#imas_cg", "#1kari", "#monogatari",
+      "#cfvanguard", "#実在性ミリオンアーサー", "#teamdayan", "#anime_dayan", "#dayan",
+      "#nekonodayan", "#morikawa3", "#donten", "#kiseiju_anime", "#loghorizon",
+      "#pp_anime", "#gレコ", "#なりヒロwww", "#君嘘", "#yuyuyu"
+    )
+    filter.track(track)
+
+    val learning_data = MLUtils.loadLibSVMFile(sc, "/tmp/sample.data.svm.txt").cache()
+    val model = SVMWithSGD.train(learning_data, 10)
+    model.clearThreshold()
+
+    val tweets = TwitterDmmUtils.createStream(ssc, None, filter)
     /**
-      * 5秒分のtweet
-      * <word>,(Array[(word,title,ganre,score)],1)
-      */
-    val statuses = tweets.flatMap(status =>{
-	    val kuromojiList = kuromojiParser(status.getText,status.getId)
-	 (kuromojiList)
-	}).map{row =>{
-		val list = wordSearch(row).split("\n")
-		val a = list.drop(1).map( t =>{
-			val cols = t.split(",")
-			(row,cols(0),cols(1),cols(2))
-		})
-	
-		(row,(a,1))
-	}}
-//    statuses.print()
-    /**
-     * 1時間分のtweetの集計countの降順
-     * <1時間分のcount> ,(Array[(word,title,ganre,score)],<ワード>)
+     * 5秒分のtweet
+     * <word>, (Array[Product], count)
      */
-    //val perOneHours = statuses.reduceByKeyAndWindow((a:(String,Int),b:(String,Int)) =>{(a._1+":"+b._1,a._2+b._2)},Minutes(60)).map{
-    //		 case(a,b) => (b._2,(b._1,a))
-    val perOneHours = statuses.reduceByKeyAndWindow( (a:(Array[Tuple4[String,String,String,String]],Int),b:(Array[Tuple4[String,String,String,String]],Int)) =>{
-		val c = a._1
-		(c,a._2+b._2)
-	},Minutes(60)).map{
-		 case(a,b) => (b._2,(b._1,a))
-	}.transform(_.sortByKey(false))
-//    perOneHours.print()
-     /**
-      * 1時間分のvertexとedgeを返す
-      * Array[count,((uniqueID,Type,Name),(From,To,Score)]
-      */
-    var m_table = scala.collection.mutable.HashMap.empty[String,(String,String)]
-    var edge = List.empty[(String,String,Any)]
-    var graphBaseData = perOneHours.map( row =>{
-        val (count,(list,word)) = row
-
-        val word_digest = MessageDigest.getInstance("MD5").digest(word.getBytes).map("%02x".format(_)).mkString
-	if(!m_table.contains(word_digest)){
-		m_table += word_digest -> ("word",word)
-	}
-	list.map( products =>{
-		val (word,title,ganre,score) = products
-		val product_digest = MessageDigest.getInstance("MD5").digest(title.getBytes).map("%02x".format(_)).mkString
-		if(!m_table.contains(product_digest)){
-			m_table += word_digest -> ("product",title)
-		}
-		val ganre_digest = MessageDigest.getInstance("MD5").digest(ganre.getBytes).map("%02x".format(_)).mkString
-		if(!m_table.contains(product_digest)){
-			m_table += word_digest -> ("ganre",ganre)
-		}
-		edge = edge ::: List((word_digest,product_digest,score))
-		edge = edge ::: List((product_digest,ganre_digest,score))
-	})
-	(count)
-    }).print()
-    
-
-    
-//    val graph = statuses.map(fields => (findShipName(account_map_list, fields._1, fields._2), textConverter(keywords, shipNames, fields._2)))
-//            .flatMap(fields => fields._2.map(fields._1 + "dmtc_separator" + _))
-//    graph.foreachRDD(rdd => rdd.foreach(t => publishMQ(t)))
-//    val tokenizer = Tokenizer.builder.mode(Tokenizer.Mode.NORMAL).build
-//ハッシュタグで抜き出し
-//    val words = statuses.flatMap{status => tokenizer.tokenize(status).toArray}
-//    words.foreach { t =>
-// 	val token = t.asInstanceOf[Token]
-//	println(s"$token.getSurfaceFrom} - $token.getAllFeatures}")
-//    }
-//    val hashtags = words.filter(word => word.startsWith("#"))
-//    val counts = hashtags.countByValueAndWindow(Seconds(60 * 5), Seconds(1))
-//                         .map { case(tag, count) => (count, tag) }
-//    counts.foreach(rdd => println(rdd.top(10).mkString("\n")))
+    val statuses = tweets.map { status =>
+      kuromojiParser(status.getText, status.getId)
+    }.map {
+      case (tweet, words) =>
+        /**
+         * 各単語ごとに商品を検索して、スコアの中央値を計算
+         */
+        val findImage = """(\/[\/\w]+\.(jpg|png))""".r
+        val wordsWithProducts = words.map { word =>
+          val searchResultCSV = wordSearch(word).split("\n")
+          val products: Array[Product] =
+            searchResultCSV.drop(1).map { row =>
+              val cols = row.split(",")
+              val (title, genre) = (cols(0), cols(1))
+              val score = allCatch opt cols(2).toDouble getOrElse (0.0)
+              val image = allCatch opt findImage.findFirstIn(row).head.toString getOrElse("")
+              (title, genre, score, image)
+            } filter { case (title, genre, score, image) => score > 0.0 && image != "" }
+          val median = products.length match {
+            case 0 => 0.0
+            case n => products(ceil(n / 2).toInt)._3
+          }
+          (word, products, median)
+        }
+        /**
+         * 各ツイートごとに、単語を次元とした中央値のベクトルを生成
+         */
+        val svmVector = wordsWithProducts.map {
+          case (word, products, median) => median
+        }
+        val svmPredict = svmVector.length match {
+          case 0 => 0.0
+          case n => model.predict(Vectors.dense(svmVector.sum / svmVector.length))
+        }
+        (tweet, wordsWithProducts, svmPredict)
+    }.filter {
+      case (tweet, wordsWithProducts, svmPredict) => svmPredict > 1.0
+    }.flatMap {
+      case (tweet, wordsWithProducts, svmPredict) =>
+        wordsWithProducts.map {
+          case (word, products, median) =>
+            (word, (1, products))
+        }
+    }
+    //    statuses.print()
+    /**
+     * 1時間分のwordの集計
+     * <ワード>, (<1時間分のcount>, Array[Product])
+     */
+    val perOneHours = statuses.reduceByKeyAndWindow(
+      {
+        case ((count1: Int, products1: Array[Product]),
+              (count2: Int, products2: Array[Product])) =>
+          (count1 + count2, products1)
+      }, Minutes(60)
+    )
+    //    perOneHours.print()
+    /**
+     * 1時間分のGraphを生成する
+     */
+    val graphBaseData = perOneHours.flatMap {
+      case (word, (count, products)) =>
+        val word_digest = GraphX.generateHash("word", word)
+        val productList = products.toList.map {
+          case (title, genre, score, image) =>
+            val product_digest = GraphX.generateHash("product", title)
+            List(
+              product_digest,
+              title,
+              score,
+              image
+            ).mkString("::")
+        }.take(5).mkString(":-:")
+        products.toList.flatMap {
+          case (title, genre, score, image) =>
+            val product_digest = GraphX.generateHash("product", title)
+            val genre_digest = GraphX.generateHash("genre", genre)
+            List(
+              Edge(word_digest, product_digest, ("search", word, count, score, productList)),
+              Edge(product_digest, genre_digest, ("attr", genre, 1, score, ""))
+            )
+        }
+    }.foreachRDD { edgeRDD =>
+      val graph = Graph.fromEdges(edgeRDD, GraphX.initialMessage)
+      val clustedGraph = GraphX.calcGenreWordRelation(graph)
+      clustedGraph.vertices.filter { vertex =>
+        vertex._2._2 == "genre"
+      }.map { vertex =>
+        val genreId = vertex._1
+        val wordRelations = vertex._2._1.filter {
+          case (id, (word, genre, count, score, productList)) =>
+            genre != "" && score > 0.5 && count >= 3
+        }
+        (genreId, wordRelations)
+      }.collect {
+        case genreRow if genreRow._2.size >= 3 =>
+          val (genreId, wordRelations) = genreRow
+          val genre = wordRelations.values.head._2
+          val words = wordRelations.map {
+            case (wordId, (word, genre, count, score, productList)) => 
+              List(
+                GraphX.generateHash(genre, word),
+                word,
+                count,
+                score,
+                productList
+              ).mkString(":=:")
+          }
+          val result = List(
+            genreId,
+            genre,
+            words.mkString("<>")
+          ).mkString("\t")
+          publishMQ(config, result)
+          result.take(100) + "..."
+      }.collect.take(3).foreach(println(_))
+      println("----------------------------")
+    }
 
     ssc.checkpoint("checkpoint")
     ssc.start()
     ssc.awaitTermination()
   }
-  
-//  def findShipName(data: List[(Long, String)], key: Long, text: String): String = {
-//    val result = data.filter(_._1 == key)
-//    result.length match {
-//      case 0 => getKanmusuName(text)
-//      case _ => result(0)._2
-//    }
-//  }
-//  def combiner(a: List[String], b: List[String]): List[String] = {
-//    a.length match {
-//      case 0 => combiner(List(""), b)
-//      case _ => b.length match {
-//          case 0 => combiner(a, List(""))
-//          case _ => a.map( x => b.map( y => x + "dmtc_separator" + y)).flatten
-//      }
-//    }
-//  }
-//  def textParser(dic: List[String], text: String): List[String] = {
-//    dic.filter(text.indexOf(_) > -1)
-//  }
-//  def textConverter(dic1: List[String], dic2: List[String], text: String): List[String] = {
-//    val simpleKeywordList = textParser(dic1, text)
-//    val simpleKanmusuList = textParser(dic2, text)
-//    val solrKanmusuName = getKanmusuName(text)
-//    println(solrKanmusuName)
-//    val kanmusuList = solrKanmusuName.length match {
-//      case 0 => simpleKanmusuList
-//      case _ => solrKanmusuName :: simpleKanmusuList
-//    }
-//    println(simpleKanmusuList)
-//    println(kanmusuList)
-//    val kuromojiList = kuromojiParser(text)
-//    val keywordList = kuromojiList ::: simpleKeywordList
-//    val graph = combiner(keywordList.distinct, kanmusuList.distinct)
-//    val result = graph.map(_ + "dmtc_separator" + text.replace("\"", "\\\"").replace("\r", "").replace("\n", ""))
-////    println(result)
-//    result
-//  }
-//  def publishMQ(message: String) {
-//    val fields = message.split("dmtc_separator", 4)
-//    val factory = new ConnectionFactory()
-//    factory.setUsername("guest")
-//    factory.setPassword("guest")
-//    factory.setVirtualHost("/")
-//    factory.setHost("vmsvr003")
-//    factory.setPort(5672)
-//    val conn = factory.newConnection()
-//    val channel = conn.createChannel()
-//    val json = "{\"source\": \"" + fields(0) + "\", \"target\": \"" + fields(2) + "\", \"word\": \"" + fields(1) + "\", \"message\": \"" + fields(3) + "\", \"weight\": 1}"
-//    println(json)
-//    fields(0).length + fields(2).length match {
-//      case 0 => println("skip")
-//      case _ => channel.basicPublish("", "kankore", null, json.getBytes())
-//    }
-//    channel.close()
-//    conn.close()
-//  }
-//  def getKanmusuName(text: String):String = {
-//    val solrKanmusuResult = searchKanmusuName(text)
-//    val solrResultList = solrKanmusuResult.replace("\r", "").replace("\n", "").split(",")
-//    val solrKanmusuName = solrResultList.length match {
-//      case 3 => solrResultList(2)
-//      case _ => ""
-//    }
-//    solrKanmusuName
-//  }
+
   /**
    * search from solr
    */
-  def wordSearch(text:String): String = {
-    val encodeText = URLEncoder.encode(text,"UTF-8")
-    val request = url("http://vmsvr004:8888/solr/dmm/select?start=0&rows=30&defType=edismax&fl=title,genre,score&fq=-service:mono&qf=title_ja%5E30.0%20title_cjk%5E12.0%20subtitle_ja%5E20.0%20subtitle_cjk%5E8.0%20comment_ja%5E0.1%20comment_cjk%5E0.1&q=" + encodeText + "&wt=csv")
+  def wordSearch(text: String): String = {
+    val encodeText = URLEncoder.encode(text, "UTF-8")
+    val request = url("http://vmsvr004:8888/solr/dmm/select?start=0&rows=30&defType=edismax&fl=title,genre,score,detail&fq=-service:mono&qf=title_ja%5E30.0%20title_cjk%5E12.0%20subtitle_ja%5E20.0%20subtitle_cjk%5E8.0%20comment_ja%5E0.1%20comment_cjk%5E0.1&q=" + encodeText + "&wt=csv")
     val response = http(request OK as.String)
     response.onComplete {
       case Success(msg) => msg
@@ -224,26 +235,36 @@ val http = new Http()
   /**
    * tweet to word list
    */
-  def kuromojiParser(text: String, id:Long): List[String] = {
-    //@todo modified tokenize
-    val tokenizer = Tokenizer.builder.mode(Tokenizer.Mode.NORMAL).build
-    //val tokenizer = Tokenizer.builder.userDictionary("/tmp/dmm_userdict.txt").build
+  def kuromojiParser(text: String, id: Long): (String, List[String]) = {
+    // @todo modified tokenize
+    val tokenizer = UserDic.getInstance()
     val tokens = tokenizer.tokenize(text).toArray
-    val result = tokens
-      .filter { t =>
-        val token = t.asInstanceOf[Token]
-
-        token.getPartOfSpeech.indexOf("名詞") > -1 && token.getPartOfSpeech.indexOf("一般") > -1 
-//        token.getPartOfSpeech.indexOf("名詞") > -1 
-      }
-      .map(t => t.asInstanceOf[Token].getSurfaceForm)
-      .filter{ v =>
-	v.length > 1 && !(v matches "^[a-zA-Z]+$|^[0-9]+$")
-      }
-      .toList
-    result.length match {
-      case 0 => List.empty[String]
-      case _ => List( result.last)
-    }
+    val wordList = tokens.map { token =>
+      token.asInstanceOf[Token]
+    }.collect {
+      case token if {
+        val partOfSpeech = token.getPartOfSpeech
+        val normalNoun = (partOfSpeech.indexOf("名詞") > -1 && partOfSpeech.indexOf("一般") > -1)
+        val customNoun = partOfSpeech.indexOf("カスタム名詞") > -1
+        normalNoun || customNoun
+      } =>
+        token.asInstanceOf[Token].getSurfaceForm
+    }.filter { word =>
+      (word.length >= 2) && !(word matches "^[a-zA-Z]+$|^[0-9]+$")
+    }.toList
+    (text, wordList)
+  }
+  def publishMQ(config: Config, message: String) {
+    val factory = new ConnectionFactory()
+    factory.setUsername(config.getString("rabbitmq.username"))
+    factory.setPassword(config.getString("rabbitmq.password"))
+    factory.setVirtualHost(config.getString("rabbitmq.virtualHost"))
+    factory.setHost(config.getString("rabbitmq.host"))
+    factory.setPort(config.getInt("rabbitmq.port"))
+    val conn = factory.newConnection()
+    val channel = conn.createChannel()
+    channel.basicPublish("", config.getString("rabbitmq.queue"), null, message.getBytes())
+    channel.close()
+    conn.close()
   }
 }

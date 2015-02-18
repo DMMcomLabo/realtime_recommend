@@ -4,3 +4,11 @@
     "accessToken": "YOUR_ACCESS_TOKEN"
     "accessTokenSecret": "YOUR_ACCESS_TOKEN_SECRET"
 }
+"rabbitmq": {
+    "username": "YOUR_USERNAME"
+    "password": "YOUR_PASSWORD"
+    "virtualHost": "/"
+    "host": "YOUR_HOST"
+    "port": 5672
+    "queue": "YOUR_QUEUE_NAME"
+}
