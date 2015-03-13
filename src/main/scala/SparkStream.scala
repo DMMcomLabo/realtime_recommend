@@ -190,46 +190,45 @@ object SparkStream {
         val wordRelations = vertex._2._1
         val wordScores = wordRelations.filter {
           case (id, (word, genre, count, score, productList)) =>
-            genre != ""
-        }.map { wordRelation =>
+            genre != "" && score > 0.5 && count >= 3
+        }/*.map { wordRelation =>
           val wordId = wordRelation._1
           val word = wordRelation._2._1
           val score = wordRelation._2._4
           (wordId, (word, score))
-        }
+        }*/
         val genre = wordRelations.values.head._2
         (genreId, genre, wordScores)
       }.flatMap {
         case (genreId, genre, wordScores) =>
           wordScores.map {
-            case (wordId, (word, score)) =>
+            case (wordId, (word, genre, count, score, productList)) =>
+            //case (wordId, (word, score)) =>
               val intGenreId = genreId.toInt.abs % 100000 // intGenreIdからgenreIdへの写像が欲しい
-              (wordId, (word, genre, intGenreId, Seq((intGenreId, score))))
+              (wordId, (word, genre, count, score, productList, intGenreId, Seq((intGenreId, score))))
           }
       }
       val genreIdMap = words.map {
-        case(wordId, (word, genre, intGenreId, genreSeq)) =>
+        case(wordId, (word, genre, count, score, productList, intGenreId, genreSeq)) =>
           (intGenreId, genre)
       }.collect.toMap
 
       val wordVectors = words.reduceByKey {
-        case ((word1, genre1, intGenreId1, seq1), (word2, genre2, intGenreId2, seq2)) =>
-          (word1, genre1, intGenreId1, seq1++seq2)
+        case ((word1, genre1, count1, score1, productList1, intGenreId1, seq1), (word2, genre2, count2, score2, productList2, intGenreId2, seq2)) =>
+          (word1, genre1, count1, score1, productList1, intGenreId1, seq1++seq2)
       }.map {
-        case (wordId, (word, genre, intGenreId, genreSeq)) =>
-          (Vectors.sparse(100000, genreSeq), wordId, word)
-      }.cache()
+        case (wordId, (word, genre, count, score, productList, intGenreId, genreSeq)) =>
+          (Vectors.sparse(100000, genreSeq), wordId, word, count, score, productList)
+      }
       
       //wordVectors.collect.foreach(println(_))
       if (wordVectors.count > 0){
         val numClusters  = 20
         val numIterations = 20
         val trainVectors = wordVectors.map(_._1)
-        trainVectors.cache()
         val clusters = KMeans.train(trainVectors, numClusters, numIterations)
         //val WSSSE = clusters.computeCost(wordVectors)
         //println("Within Set Sum of Squared Errors = " + WSSSE)
-
 
         // clusterCentersはArray
         // centerVectorはmllib.linalg.Vector
@@ -248,41 +247,34 @@ object SparkStream {
         }.toMap
 
         wordVectors.map {
-          case(wordVector, wordId, word) =>
+          case(wordVector, wordId, word, count, score, productList) =>
             //(clusters.predict(wordVector), (wordId, word))
-            (genreMap.getOrElse(clusters.predict(wordVector), ""), word)
-        }.groupByKey().collect.foreach(println(_))
+            (genreMap.getOrElse(clusters.predict(wordVector), ""), Seq((word, count, score, productList)))
+        }.reduceByKey((word1, word2) => word1++word2).filter {
+          case(clusterName, wordSeq) => wordSeq.length >= 2
+        }.map {
+          case(clusterName, wordSeq) =>
+            val words = wordSeq.map {
+              case(word, count, score, productList) =>
+                List(
+                  GraphX.generateHash(clusterName, word),
+                  word,
+                  count,
+                  score,
+                  productList
+                ).mkString(":=:")
+            }
+            val result = List(
+              GraphX.generateHash("genre", clusterName),
+              clusterName,
+              words.mkString("<>")
+            ).mkString("\t")
+            publishMQ(config, result)
+            result.take(100) + "..."
+            (clusterName, wordSeq.map(_._1))
+        }
+      }.collect.foreach(println(_))
 
-        //clusters.clusterCenters.foreach {
-        //  center => println(f"${center.toArray.mkString("[", ", ", "]")}%s")
-        //}
-      }
-
-/*
-      .collect {
-        case genreRow if genreRow._2.size >= 3 =>
-          val (genreId, wordRelations) = genreRow
-          val genre = wordRelations.values.head._2
-          val words = wordRelations.map {
-            case (wordId, (word, genre, count, score, productList)) => 
-              List(
-                GraphX.generateHash(genre, word),
-                word,
-                count,
-                score,
-                productList
-              ).mkString(":=:")
-          }
-          val result = List(
-            genreId,
-            genre,
-            words.mkString("<>")
-          ).mkString("\t")
-          publishMQ(config, result)
-          result.take(100) + "..."
-      }
- */
-//.collect.foreach(println(_))
       println("----------------------------")
     }
 
