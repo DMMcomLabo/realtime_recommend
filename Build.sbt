@@ -27,6 +27,8 @@ libraryDependencies += "com.typesafe" % "config" % "1.2.1"
 
 libraryDependencies += "com.rabbitmq" % "amqp-client" % "2.7.1"
 
+libraryDependencies += "ly.stealth" % "scala-kafka" % "0.1.0.0"
+
 libraryDependencies += "net.databinder.dispatch" %% "dispatch-core" % "0.11.0"
 
 libraryDependencies += "org.atilika.kuromoji" % "kuromoji" % "0.7.7"
