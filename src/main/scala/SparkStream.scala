@@ -44,6 +44,9 @@ import scala.concurrent.duration._
 import scala.util.control.Exception._
 import scala.util.{ Try, Success, Failure }
 
+import org.apache.spark.mllib.clustering.KMeans
+import org.apache.spark.mllib.linalg.{Vector, Vectors}
+
 import org.atilika.kuromoji.Tokenizer
 import org.atilika.kuromoji.Token
 
@@ -180,16 +183,83 @@ object SparkStream {
     }.foreachRDD { edgeRDD =>
       val graph = Graph.fromEdges(edgeRDD, GraphX.initialMessage)
       val clustedGraph = GraphX.calcGenreWordRelation(graph)
-      clustedGraph.vertices.filter { vertex =>
+      val words = clustedGraph.vertices.filter { vertex =>
         vertex._2._2 == "genre"
       }.map { vertex =>
         val genreId = vertex._1
-        val wordRelations = vertex._2._1.filter {
+        val wordRelations = vertex._2._1
+        val wordScores = wordRelations.filter {
           case (id, (word, genre, count, score, productList)) =>
-            genre != "" && score > 0.5 && count >= 3
+            genre != ""
+        }.map { wordRelation =>
+          val wordId = wordRelation._1
+          val word = wordRelation._2._1
+          val score = wordRelation._2._4
+          (wordId, (word, score))
         }
-        (genreId, wordRelations)
-      }.collect {
+        val genre = wordRelations.values.head._2
+        (genreId, genre, wordScores)
+      }.flatMap {
+        case (genreId, genre, wordScores) =>
+          wordScores.map {
+            case (wordId, (word, score)) =>
+              val intGenreId = genreId.toInt.abs % 100000 // intGenreIdからgenreIdへの写像が欲しい
+              (wordId, (word, genre, intGenreId, Seq((intGenreId, score))))
+          }
+      }
+      val genreIdMap = words.map {
+        case(wordId, (word, genre, intGenreId, genreSeq)) =>
+          (intGenreId, genre)
+      }.collect.toMap
+
+      val wordVectors = words.reduceByKey {
+        case ((word1, genre1, intGenreId1, seq1), (word2, genre2, intGenreId2, seq2)) =>
+          (word1, genre1, intGenreId1, seq1++seq2)
+      }.map {
+        case (wordId, (word, genre, intGenreId, genreSeq)) =>
+          (Vectors.sparse(100000, genreSeq), wordId, word)
+      }.cache()
+      
+      //wordVectors.collect.foreach(println(_))
+      if (wordVectors.count > 0){
+        val numClusters  = 20
+        val numIterations = 20
+        val trainVectors = wordVectors.map(_._1)
+        trainVectors.cache()
+        val clusters = KMeans.train(trainVectors, numClusters, numIterations)
+        //val WSSSE = clusters.computeCost(wordVectors)
+        //println("Within Set Sum of Squared Errors = " + WSSSE)
+
+
+        // clusterCentersはArray
+        // centerVectorはmllib.linalg.Vector
+        val genreMap = clusters.clusterCenters.zipWithIndex.map { case(centerVector, clusterId) =>
+          var maxIndex: Int = 0
+          var maxValue: Double = 0
+          for (i <- 0 to centerVector.size-1 ) {
+            val element = centerVector.apply(i)
+            if (element > maxValue) {
+              maxIndex = i
+              maxValue = element
+            }
+          }
+          (clusterId, genreIdMap.getOrElse(maxIndex,""))
+          //centerVector.apply(0)
+        }.toMap
+
+        wordVectors.map {
+          case(wordVector, wordId, word) =>
+            //(clusters.predict(wordVector), (wordId, word))
+            (genreMap.getOrElse(clusters.predict(wordVector), ""), word)
+        }.groupByKey().collect.foreach(println(_))
+
+        //clusters.clusterCenters.foreach {
+        //  center => println(f"${center.toArray.mkString("[", ", ", "]")}%s")
+        //}
+      }
+
+/*
+      .collect {
         case genreRow if genreRow._2.size >= 3 =>
           val (genreId, wordRelations) = genreRow
           val genre = wordRelations.values.head._2
@@ -210,9 +280,12 @@ object SparkStream {
           ).mkString("\t")
           publishMQ(config, result)
           result.take(100) + "..."
-      }.collect.take(3).foreach(println(_))
+      }
+ */
+//.collect.foreach(println(_))
       println("----------------------------")
     }
+
 
     ssc.checkpoint("checkpoint")
     ssc.start()
@@ -224,13 +297,13 @@ object SparkStream {
    */
   def wordSearch(text: String): String = {
     val encodeText = URLEncoder.encode(text, "UTF-8")
-    val request = url("http://vmsvr004:8888/solr/dmm/select?start=0&rows=30&defType=edismax&fl=title,genre,score,detail&fq=-service:mono&qf=title_ja%5E30.0%20title_cjk%5E12.0%20subtitle_ja%5E20.0%20subtitle_cjk%5E8.0%20comment_ja%5E0.1%20comment_cjk%5E0.1&q=" + encodeText + "&wt=csv")
+    val request = url("http://10.1.1.175:8983/solr/dmm/select?start=0&rows=30&defType=edismax&fl=title,genre,score,detail&fq=-service:mono&qf=title_ja%5E30.0%20title_cjk%5E12.0%20subtitle_ja%5E20.0%20subtitle_cjk%5E8.0%20comment_ja%5E0.1%20comment_cjk%5E0.1&q=" + encodeText + "&wt=csv")
     val response = http(request OK as.String)
     response.onComplete {
       case Success(msg) => msg
       case Failure(t)   => ""
     }
-    Await.result(response, 1.seconds)
+    Await.result(response, 5.seconds)
   }
   /**
    * tweet to word list
